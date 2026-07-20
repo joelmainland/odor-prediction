@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Does it smell? — Odor prediction from molecular structure</title>
+<meta name="description" content="Predict whether a molecule is odorous or odorless from its structure, based on the transport-feature model of Mayhew et al. (PNAS 2022)." />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="site-header">
+  <div class="wrap">
+    <h1>Does&nbsp;it&nbsp;smell?</h1>
+    <p class="tagline">Predict whether a molecule is <strong>odorous</strong> or <strong>odorless</strong> from its chemical structure.</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card input-card">
+    <label for="query" class="field-label">Enter a molecule</label>
+    <p class="hint">Type a <strong>SMILES</strong> string (e.g. <code>CCO</code>) or a common chemical <strong>name</strong> (e.g. <em>vanillin</em>).</p>
+    <div class="input-row">
+      <input id="query" type="text" placeholder="e.g. O=Cc1ccc(O)c(OC)c1  or  vanillin" autocomplete="off" spellcheck="false" />
+      <button id="predict" type="button" disabled>Loading…</button>
+    </div>
+    <div class="examples">
+      <span>Try:</span>
+      <button class="ex" data-q="vanillin">vanillin</button>
+      <button class="ex" data-q="CCO">ethanol (SMILES)</button>
+      <button class="ex" data-q="water">water</button>
+      <button class="ex" data-q="limonene">limonene</button>
+      <button class="ex" data-q="CC(=O)OC1=CC=CC=C1C(=O)O">aspirin (SMILES)</button>
+      <button class="ex" data-q="glucose">glucose</button>
+    </div>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <section id="result" class="result hidden">
+    <div class="card verdict-card">
+      <div id="verdict" class="verdict"></div>
+      <div class="structure">
+        <div id="structure-svg"></div>
+        <div id="mol-name" class="mol-name"></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Prediction basis</h3>
+        <div id="basis"></div>
+      </div>
+      <div class="card">
+        <h3>Computed properties</h3>
+        <table id="props" class="props"></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Transport model <small>(vapor pressure &amp; logP boundaries)</small></h3>
+      <p class="hint">The published model separates odorants using two boundary lines in
+        vapor-pressure / logP space. Vapor pressure cannot be computed from structure alone,
+        so it is taken from the paper's dataset when available, or you may enter a measured value.</p>
+      <div id="transport-box"></div>
+      <details class="advanced">
+        <summary>Enter measured values manually</summary>
+        <div class="manual-inputs">
+          <label>Vapor pressure (mmHg, 25&nbsp;°C)
+            <input id="man-vp" type="number" step="any" placeholder="e.g. 0.1" /></label>
+          <label>logP (octanol/water)
+            <input id="man-logp" type="number" step="any" placeholder="auto from structure" /></label>
+          <button id="man-run" type="button">Recompute boundary model</button>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section class="card about">
+    <h2>How this works</h2>
+    <p>
+      This tool implements the odor-classification models from
+      <a href="https://doi.org/10.1073/pnas.2116576119" target="_blank" rel="noopener">Mayhew&nbsp;et&nbsp;al.,
+      “Transport features predict if a molecule is odorous,” <em>PNAS</em> 2022</a>.
+      The central idea: a molecule smells only if it can physically complete the journey to an
+      olfactory receptor. That journey is governed by simple transport properties —
+      <strong>volatility</strong> (vapor pressure / boiling point) and
+      <strong>hydrophobicity</strong> (logP). Molecules that are too heavy or too polar never reach
+      the receptors and are odorless.
+    </p>
+    <p>Two models from the paper are used here:</p>
+    <ul>
+      <li><strong>Rule of three</strong> — a molecule with molecular weight between 30 and 300&nbsp;Da
+        and fewer than four heteroatoms is generally odorous. Works for any structure and is
+        computed entirely in your browser. In the paper, 96% of molecules meeting these criteria are odorous.</li>
+      <li><strong>Transport boundary model</strong> — logistic-regression boundaries in
+        vapor&nbsp;pressure / logP space (AUROC&nbsp;≈&nbsp;0.88–0.98). Requires a vapor-pressure value.</li>
+    </ul>
+    <p>
+      When you enter one of the 1,924 molecules from the study's curated dataset, the tool also shows
+      the actual <strong>gradient-boosted transport-ML probability</strong> reported in the paper.
+      Structure parsing, 2-D depiction, molecular weight, logP and heteroatom counts are computed
+      client-side with <a href="https://www.rdkit.org/" target="_blank" rel="noopener">RDKit</a> (WebAssembly).
+      Chemical-name lookup uses the public <a href="https://pubchem.ncbi.nlm.nih.gov/" target="_blank" rel="noopener">PubChem</a> API.
+    </p>
+    <p class="disclaimer">
+      For research and educational use. Predictions are estimates of odor <em>class</em>, not odor
+      quality or intensity, and can be wrong — especially for molecules unlike those in the training set.
+    </p>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>Model &amp; data: Mayhew, Arayata, Gerkin, Lee, Magill, Snyder, Little, Yu &amp; Mainland,
+      <em>PNAS</em> 119(15):e2116576119 (2022).
+      Code &amp; dataset: <a href="https://github.com/emayhew/OlfactorySpace" target="_blank" rel="noopener">github.com/emayhew/OlfactorySpace</a>.</p>
+    <p>This is an independent educational reimplementation of the published model.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@rdkit/rdkit@2025.3.4-1.0.0/dist/RDKit_minimal.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
