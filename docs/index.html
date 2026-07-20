@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Does it smell? — Odor prediction from molecular structure</title>
-<meta name="description" content="Predict whether a molecule is odorous or odorless from its structure, based on the transport-feature model of Mayhew et al. (PNAS 2022)." />
+<title>Molecule odor & inhalation explorer — properties from chemical structure</title>
+<meta name="description" content="Explore a molecule from its chemical structure: predict whether it is odorous, visualize the transport-boundary model (Mayhew et al., PNAS 2022), and see an inhalation Threshold-of-Toxicological-Concern reference (Mohar et al. 2025)." />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <header class="site-header">
   <div class="wrap">
-    <h1>Does&nbsp;it&nbsp;smell?</h1>
-    <p class="tagline">Predict whether a molecule is <strong>odorous</strong> or <strong>odorless</strong> from its chemical structure.</p>
+    <h1>The&nbsp;Molecule&nbsp;Explorer</h1>
+    <p class="tagline">From a chemical structure: predict whether it is <strong>odorous</strong>, map it on the
+      <strong>transport-boundary</strong> model, and see an <strong>inhalation-exposure</strong> reference.</p>
   </div>
 </header>
 
@@ -73,6 +74,17 @@
         </div>
       </details>
     </div>
+
+    <div class="card">
+      <h3>Inhalation reference <small>(Threshold of Toxicological Concern)</small></h3>
+      <p class="hint">A neutral, comparative figure: how many sniffs of the <em>neat</em> (undiluted)
+        headspace would together deliver the molecule's daily <strong>Threshold of Toxicological
+        Concern (TTC)</strong>. Derived from its Cramer class / mutagenicity alert and vapor pressure,
+        assuming a 0.5&nbsp;L average sniff (Laing 1983). Available only for molecules in the
+        toxicological reference set. <strong>This is not a safety determination, exposure limit, or
+        recommendation.</strong></p>
+      <div id="tox-box"></div>
+    </div>
   </section>
 
   <section class="card about">
@@ -101,6 +113,19 @@
       Structure parsing, 2-D depiction, molecular weight, logP and heteroatom counts are computed
       client-side with <a href="https://www.rdkit.org/" target="_blank" rel="noopener">RDKit</a> (WebAssembly).
       Chemical-name lookup uses the public <a href="https://pubchem.ncbi.nlm.nih.gov/" target="_blank" rel="noopener">PubChem</a> API.
+    </p>
+    <h3>Inhalation reference</h3>
+    <p>
+      For molecules in a small toxicological reference set, the tool also reports how many sniffs of the
+      <em>neat</em> (undiluted) headspace would together deliver the molecule's daily
+      <strong>Threshold of Toxicological Concern (TTC)</strong>. The TTC is assigned from the molecule's
+      <strong>Cramer class</strong> or a mutagenicity structural alert; the per-sniff inhaled mass is
+      estimated from vapor pressure and molecular weight assuming a 0.5&nbsp;L average sniff
+      (<a href="https://doi.org/10.1016/0031-9384(83)90104-0" target="_blank" rel="noopener">Laing 1983</a>).
+      The inhalation-exposure framing follows
+      <a href="https://doi.org/10.3390/toxics13100902" target="_blank" rel="noopener">Mohar&nbsp;et&nbsp;al., <em>Toxics</em> 2025</a>.
+      This figure is a deliberately conservative, comparative reference — <strong>not</strong> a safety
+      determination, exposure limit, or recommendation.
     </p>
     <p class="disclaimer">
       For research and educational use. Predictions are estimates of odor <em>class</em>, not odor

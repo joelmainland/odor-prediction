@@ -17,10 +17,21 @@
     return { low: -1.72 * l - 9.10, high: -1.61 * l + 8.17 };
   }
 
+  // ---- Toxicity reference constants ----
+  // Number of sniffs of neat headspace whose combined inhaled mass equals the
+  // molecule's daily TTC. Ideal-gas headspace mass per sniff: (VP*V/RT)*MW.
+  const TOX_R = 62.36367;    // L·mmHg/(K·mol)
+  const TOX_T = 298.15;      // K (25 °C)
+  const SNIFF_L = 0.5;       // average sniff volume, Laing 1983
+  const TTC_BY_CRAMER = { I: 1800, II: 540, III: 90 }; // µg/person/day
+  const CRAMER_LABEL = { I: "Class I (low)", II: "Class II (intermediate)", III: "Class III (high)" };
+
   let RDKit = null;
   let DATA = null;           // array of molecule records
   let byKey = new Map();     // InChIKey -> record
   let byCan = new Map();     // canonical SMILES -> record
+  let byKeyTox = new Map();  // InChIKey -> toxicity record
+  let byCanTox = new Map();  // canonical SMILES -> toxicity record
   let current = null;        // { mol data for manual recompute }
 
   const $ = (id) => document.getElementById(id);
@@ -42,6 +53,13 @@
         if (rec.can) byCan.set(rec.can, rec);
       }
     }),
+    // Toxicity reference set is optional — degrade gracefully if it fails.
+    fetch("data/toxicity.json").then((r) => r.json()).then((d) => {
+      for (const rec of d) {
+        if (rec.ikey) byKeyTox.set(rec.ikey, rec);
+        if (rec.can) byCanTox.set(rec.can, rec);
+      }
+    }).catch(() => {}),
   ]).then(() => {
     const btn = $("predict");
     btn.disabled = false;
@@ -238,6 +256,79 @@
     renderVerdict(primary, hit);
     renderBasis(rule, datasetProb, hit, flags);
     renderTransport(current, false);
+    renderToxicity(ikey, canon);
+  }
+
+  // ---- Toxicity reference (lookup only) ----
+  // TTC hierarchy (Kroes/Munro; matches the R app's README, not its code):
+  // a genotoxicity alert takes precedence over the Cramer class.
+  function toxTTC(rec) {
+    if (rec.gradient === "Mutagen") return 1.5;
+    if (rec.mutagen === "NO") return 1.5;   // "NO" = Ames structural alert present
+    return TTC_BY_CRAMER[rec.cramer] != null ? TTC_BY_CRAMER[rec.cramer] : null;
+  }
+
+  function sniffsToTTC(rec) {
+    const ttc = toxTTC(rec);
+    if (ttc == null || !(rec.vp > 0) || !(rec.mw > 0)) return null;
+    // µg of saturated (neat) headspace inhaled per 0.5 L sniff.
+    const massPerSniff = (rec.vp * SNIFF_L / (TOX_R * TOX_T)) * rec.mw * 1e6;
+    return { ttc, massPerSniff, sniffs: ttc / massPerSniff };
+  }
+
+  function fmtSniffs(n) {
+    if (n >= 1000) return Math.round(n).toLocaleString();
+    if (n >= 10) return n.toFixed(0);
+    if (n >= 1) return n.toFixed(1);
+    if (n >= 0.01) return n.toFixed(3);
+    return n.toExponential(1);
+  }
+
+  // Compact number: scientific for very small / very large, else ~4 sig figs.
+  function fmtSci(x) {
+    if (x == null || !isFinite(x)) return "—";
+    if (x !== 0 && (Math.abs(x) < 1e-3 || Math.abs(x) >= 1e5)) return x.toExponential(2);
+    return String(Number(x.toPrecision(4)));
+  }
+
+  function renderToxicity(ikey, canon) {
+    const box = $("tox-box");
+    if (!box) return;
+    const rec = (ikey && byKeyTox.get(ikey)) || byCanTox.get(canon) || null;
+    if (!rec) {
+      box.innerHTML =
+        `<p class="hint" style="margin:0">This molecule isn't in the toxicological reference set, ` +
+        `so no TTC figure is shown. (Lookup only for now — a predictive version is planned.)</p>`;
+      return;
+    }
+    const r = sniffsToTTC(rec);
+    if (!r) {
+      box.innerHTML = `<p class="hint" style="margin:0">Insufficient data to compute a TTC reference for this molecule.</p>`;
+      return;
+    }
+    const alert = rec.mutagen === "NO";
+    const basis = alert
+      ? "a structural alert for mutagenicity (Ames)"
+      : `Cramer ${CRAMER_LABEL[rec.cramer] || rec.cramer}`;
+    const count = fmtSniffs(r.sniffs);
+    const lead = r.sniffs < 1
+      ? `A single sniff of the neat headspace already exceeds its TTC (equivalent to ~${count} sniffs)`
+      : `Reaches its TTC after <strong>${count}</strong> sniff${r.sniffs === 1 ? "" : "s"} of neat headspace`;
+    box.innerHTML =
+      `<div class="model" style="border:none;padding-top:0">` +
+      `<div class="name">${lead} <span class="tag dataset">dataset</span></div>` +
+      `<div class="verdict-line">` +
+      `TTC = ${r.ttc} µg/person/day, from ${basis}. ` +
+      `Vapor pressure = ${fmtSci(rec.vp)} mmHg; a 0.5 L sniff of the saturated headspace carries ~${fmtSci(r.massPerSniff)} µg.` +
+      `</div>` +
+      `<div class="verdict-line" style="color:var(--muted)">A comparative reference point only — it counts how many sniffs of ` +
+      `undiluted headspace would together equal the daily Threshold of Toxicological Concern. Not a safety determination, ` +
+      `exposure limit, or recommendation.</div>` +
+      `<div class="verdict-line" style="color:var(--muted)">The TTC is a deliberately <strong>conservative</strong> generic ` +
+      `screening threshold used when no substance-specific data exist. Where a molecule has its own toxicological safety ` +
+      `data, the actual tolerable exposure is often far higher — so this figure can substantially <em>understate</em> how ` +
+      `much can be tolerated (vanillin, for example, has established safe-use levels well above what this count implies).</div>` +
+      `</div>`;
   }
 
   function ruleOfThree(desc) {
@@ -265,11 +356,13 @@
     el.parentElement.className = "card verdict-card";
     el.className = "verdict " + cls;
     const icon = primary.maybe ? "❓" : (primary.odorous ? "👃" : "🚫");
+    // Ground-truth label follows the site's odor colour code: Odor = red, Odorless = blue.
+    const gtColor = hit && hit.odor === "Odor" ? "var(--odor)" : "var(--odorless)";
     el.innerHTML =
       `<span class="pill">${escapeHtml(primary.source)}</span>` +
       `<p class="big">${icon} ${escapeHtml(primary.label)}</p>` +
       `<p class="sub">${escapeHtml(primary.conf)}` +
-      (hit ? ` · <span style="color:var(--accent)">in study dataset (ground truth: ${escapeHtml(hit.odor)})</span>` : "") +
+      (hit ? ` · <span style="color:${gtColor}">in study dataset (ground truth: ${escapeHtml(hit.odor)})</span>` : "") +
       `</p>`;
     $("result").classList.remove("hidden");
   }
@@ -354,11 +447,71 @@
       `logP = ${fmt(logp, 2)} <small style="color:var(--muted)">(${logpSource})</small>.<br>` +
       `Odorous window for this volatility: ${fmt(res.low, 2)} &lt; logP &lt; ${fmt(res.high, 2)}. ` +
       `This molecule ${res.verdict === "odor" ? "falls inside" : "falls outside"} it.` +
-      `</div></div>`;
+      `</div>` +
+      transportPlotSVG(vp, logp, res) +
+      `</div>`;
     if (logp != null && !$("man-logp").value) $("man-logp").value = fmt(logp, 3);
   }
 
+  // Scatter of the two logistic boundaries in log10(VP)/logP space, with the
+  // molecule plotted as a point inside or outside the odorous window.
+  function transportPlotSVG(vp, logp, res) {
+    const l = Math.log10(vp);
+    const low = (x) => -1.72 * x - 9.10;
+    const high = (x) => -1.61 * x + 8.17;
+    const xmin = Math.min(-9, l - 1), xmax = Math.max(3, l + 1);
+    const ymin = Math.min(-6, logp - 1), ymax = Math.max(10, logp + 1);
+    const W = 480, H = 320, mL = 46, mR = 16, mT = 16, mB = 42;
+    const pw = W - mL - mR, ph = H - mT - mB;
+    const X = (x) => mL + (x - xmin) / (xmax - xmin) * pw;
+    const Y = (y) => mT + (ymax - y) / (ymax - ymin) * ph;
+    const band =
+      `${X(xmin)},${Y(low(xmin))} ${X(xmax)},${Y(low(xmax))} ` +
+      `${X(xmax)},${Y(high(xmax))} ${X(xmin)},${Y(high(xmin))}`;
+    let grid = "", axis = "";
+    for (const t of niceTicks(xmin, xmax, 7)) {
+      const px = X(t);
+      grid += `<line x1="${px}" y1="${mT}" x2="${px}" y2="${mT + ph}" stroke="#22303e"/>`;
+      axis += `<text x="${px}" y="${mT + ph + 15}" fill="#9fb0c0" font-size="10" text-anchor="middle">${t}</text>`;
+    }
+    for (const t of niceTicks(ymin, ymax, 7)) {
+      const py = Y(t);
+      grid += `<line x1="${mL}" y1="${py}" x2="${mL + pw}" y2="${py}" stroke="#22303e"/>`;
+      axis += `<text x="${mL - 6}" y="${py + 3}" fill="#9fb0c0" font-size="10" text-anchor="end">${t}</text>`;
+    }
+    const ptColor = res.verdict === "odor" ? "#e8534f" : "#3f8bd8";
+    const cid = "tpc" + Math.random().toString(36).slice(2, 7);
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin-top:12px" ` +
+      `font-family="-apple-system,Segoe UI,Roboto,sans-serif">` +
+      `<defs><clipPath id="${cid}"><rect x="${mL}" y="${mT}" width="${pw}" height="${ph}"/></clipPath></defs>` +
+      `<rect x="${mL}" y="${mT}" width="${pw}" height="${ph}" fill="#0c141c" stroke="#2b3a49"/>` +
+      `<g clip-path="url(#${cid})">${grid}` +
+      `<polygon points="${band}" fill="rgba(63,180,90,.16)"/>` +
+      `<line x1="${X(xmin)}" y1="${Y(low(xmin))}" x2="${X(xmax)}" y2="${Y(low(xmax))}" stroke="#7f93a8" stroke-width="1.5" stroke-dasharray="5 4"/>` +
+      `<line x1="${X(xmin)}" y1="${Y(high(xmin))}" x2="${X(xmax)}" y2="${Y(high(xmax))}" stroke="#7f93a8" stroke-width="1.5" stroke-dasharray="5 4"/>` +
+      `<circle cx="${X(l)}" cy="${Y(logp)}" r="6" fill="${ptColor}" stroke="#fff" stroke-width="1.5"/></g>` +
+      axis +
+      `<rect x="${mL + 8}" y="${mT + 7}" width="13" height="9" fill="rgba(63,180,90,.16)" stroke="#7f93a8" stroke-dasharray="2 2"/>` +
+      `<text x="${mL + 25}" y="${mT + 15}" fill="#9fb0c0" font-size="10.5">odorous window</text>` +
+      `<text x="${mL + pw / 2}" y="${H - 5}" fill="#9fb0c0" font-size="11" text-anchor="middle">log₁₀ vapor pressure (mmHg)</text>` +
+      `<text transform="translate(12,${mT + ph / 2}) rotate(-90)" fill="#9fb0c0" font-size="11" text-anchor="middle">logP</text>` +
+      `</svg>`;
+  }
+
   // ---- utils ----
+  // "Nice" axis ticks (1/2/5 × 10^n) spanning [min,max], ~count divisions.
+  function niceTicks(min, max, count) {
+    const span = max - min;
+    if (!(span > 0)) return [min];
+    let step = Math.pow(10, Math.floor(Math.log10(span / count)));
+    const err = count * step / span;
+    if (err <= 0.15) step *= 10; else if (err <= 0.35) step *= 5; else if (err <= 0.75) step *= 2;
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-6; v += step) {
+      ticks.push(Math.round(v * 1e6) / 1e6);
+    }
+    return ticks;
+  }
   function num(x) { const n = typeof x === "number" ? x : parseFloat(x); return isFinite(n) ? n : null; }
   function fmt(x, d) { return x == null || !isFinite(x) ? "—" : Number(x).toFixed(d); }
   function yn(b) { return b ? "✔" : "✗"; }
