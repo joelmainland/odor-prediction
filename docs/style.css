@@ -98,6 +98,11 @@ button:disabled{opacity:.5;cursor:default}
 .tag.na{background:#2b3a49;color:var(--muted)}
 .tag.dataset{background:rgba(90,200,250,.16);color:var(--accent)}
 
+.qtable{width:100%;border-collapse:collapse;font-size:.95rem}
+.qtable td{padding:8px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+.qtable tr:last-child td{border-bottom:none}
+.qtable td:first-child{color:var(--accent);font-weight:600;white-space:nowrap;padding-right:16px;width:1%}
+
 .prob-bar{height:10px;background:#0c141c;border-radius:6px;overflow:hidden;margin:8px 0 4px}
 .prob-bar > div{height:100%;background:linear-gradient(90deg,var(--odorless),var(--odor))}
 

@@ -32,6 +32,10 @@
   let byCan = new Map();     // canonical SMILES -> record
   let byKeyTox = new Map();  // InChIKey -> toxicity record
   let byCanTox = new Map();  // canonical SMILES -> toxicity record
+  let byKeyQ = new Map();    // InChIKey -> odor-quality record
+  let byCanQ = new Map();    // canonical SMILES -> odor-quality record
+  let qualPromise = null;    // lazy-load promise for quality.json (1.1 MB)
+  let qSeq = 0;              // guards async quality renders against races
   let current = null;        // { mol data for manual recompute }
 
   const $ = (id) => document.getElementById(id);
@@ -257,6 +261,51 @@
     renderBasis(rule, datasetProb, hit, flags);
     renderTransport(current, false);
     renderToxicity(ikey, canon);
+    renderQuality(ikey, canon);
+  }
+
+  // ---- Odor quality (lookup only, lazy-loaded) ----
+  // Published-atlas descriptors aggregated via Pyrfume. quality.json is large,
+  // so it is fetched on first use rather than at boot.
+  function ensureQuality() {
+    if (!qualPromise) {
+      qualPromise = fetch("data/quality.json").then((r) => r.json()).then((d) => {
+        for (const rec of d) {
+          if (rec.ikey) byKeyQ.set(rec.ikey, rec);
+          if (rec.can) byCanQ.set(rec.can, rec);
+        }
+      }).catch(() => {});
+    }
+    return qualPromise;
+  }
+
+  // Preferred display order; any other sources are appended.
+  const QUALITY_ORDER = ["Leffingwell", "Goodscents", "Arctander", "IFRA", "Dravnieks", "Sigma", "AromaDB"];
+
+  function renderQuality(ikey, canon) {
+    const box = $("quality-box");
+    if (!box) return;
+    const seq = ++qSeq;
+    box.innerHTML = `<p class="hint" style="margin:0">Loading odor descriptors…</p>`;
+    ensureQuality().then(() => {
+      if (seq !== qSeq) return; // a newer molecule was analyzed; skip stale write
+      const rec = (ikey && byKeyQ.get(ikey)) || byCanQ.get(canon) || null;
+      if (!rec) {
+        box.innerHTML =
+          `<p class="hint" style="margin:0">This molecule isn't in the published odor-descriptor ` +
+          `datasets, so no quality profile is shown.</p>`;
+        return;
+      }
+      const srcs = rec.sources || {};
+      const keys = QUALITY_ORDER.filter((k) => srcs[k])
+        .concat(Object.keys(srcs).filter((k) => !QUALITY_ORDER.includes(k)));
+      const rows = keys.map((k) =>
+        `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(srcs[k])}</td></tr>`).join("");
+      box.innerHTML =
+        `<p class="verdict-line" style="margin:0 0 10px">Odor-character descriptors reported across ` +
+        `<strong>${rec.n}</strong> published database${rec.n === 1 ? "" : "s"}:</p>` +
+        `<table class="qtable">${rows}</table>`;
+    });
   }
 
   // ---- Toxicity reference (lookup only) ----
