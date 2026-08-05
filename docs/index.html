@@ -87,7 +87,15 @@
     </div>
 
     <div class="card">
-      <h3>Odor quality <small>(descriptors from published atlases)</small></h3>
+      <h3>Odor quality <small>(what it smells like)</small></h3>
+
+      <h4 class="sub">Predicted <small>— OpenPOM model</small></h4>
+      <p class="hint">Odor-character descriptors predicted from structure by
+        <a href="https://github.com/BioMachineLearning/openpom" target="_blank" rel="noopener">OpenPOM</a>,
+        an open implementation of the Principal Odor Map graph neural network.</p>
+      <div id="openpom-box"></div>
+
+      <h4 class="sub">Reported <small>— published atlases</small></h4>
       <p class="hint">Odor-character descriptors reported for this molecule across public odor
         databases, aggregated via <a href="https://pyrfume.org/" target="_blank" rel="noopener">Pyrfume</a>.
         Lookup only — shown for molecules present in these datasets.</p>
@@ -137,7 +145,20 @@
     </p>
     <h3>Odor quality</h3>
     <p>
-      For molecules present in public odor databases, the tool lists the <strong>odor-character
+      <strong>Predicted descriptors</strong> come from
+      <a href="https://github.com/BioMachineLearning/openpom" target="_blank" rel="noopener">OpenPOM</a>,
+      an open re-implementation of the Principal Odor Map message-passing neural network of
+      <a href="https://doi.org/10.1126/science.ade4401" target="_blank" rel="noopener">Lee&nbsp;et&nbsp;al.,
+      <em>Science</em> 2023</a>, which maps a molecular graph onto 138 odor-character labels.
+      The model was run over a fixed molecule set and the results are looked up here, so
+      predictions currently appear only for those molecules. Its outputs are
+      <strong>uncalibrated</strong> — a score of 0.4 means something very different for a common
+      label like <em>sweet</em> than for a rare one like <em>vetiver</em> — so each score is also
+      shown as its rank among all molecules the model was run over. These are model
+      <em>predictions</em>, not measurements, and are independent of the reported descriptors below.
+    </p>
+    <p>
+      For molecules present in public odor databases, the tool also lists the <strong>odor-character
       descriptors</strong> reported for them, aggregated via
       <a href="https://pyrfume.org/" target="_blank" rel="noopener">Pyrfume</a> from
       Leffingwell, The Good Scents Company, Arctander (1960), IFRA (2019), Dravnieks (1985),

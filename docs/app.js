@@ -36,6 +36,11 @@
   let byCanQ = new Map();    // canonical SMILES -> odor-quality record
   let qualPromise = null;    // lazy-load promise for quality.json (1.1 MB)
   let qSeq = 0;              // guards async quality renders against races
+  let POM = null;            // OpenPOM prediction table { labels, q, mols, alt }
+  let byKeyPOM = new Map();  // InChIKey -> [[labelIdx, score0_1000], ...]
+  let byCanPOM = new Map();  // canonical SMILES -> same
+  let pomPromise = null;     // lazy-load promise for openpom.json (2.2 MB)
+  let pSeq = 0;              // guards async OpenPOM renders against races
   let current = null;        // { mol data for manual recompute }
 
   const $ = (id) => document.getElementById(id);
@@ -261,7 +266,108 @@
     renderBasis(rule, datasetProb, hit, flags);
     renderTransport(current, false);
     renderToxicity(ikey, canon);
+    renderOpenPOM(ikey, canon);
     renderQuality(ikey, canon);
+  }
+
+  // ---- Odor quality: predicted (OpenPOM, lookup of precomputed predictions) ----
+  // Descriptor probabilities from the Principal Odor Map MPNN, precomputed for the
+  // pyrfume molecule set. openpom.json is large, so it is fetched on first use.
+  function ensureOpenPOM() {
+    if (!pomPromise) {
+      pomPromise = fetch("data/openpom.json").then((r) => r.json()).then((d) => {
+        POM = d;
+        for (const rec of d.mols) {
+          byKeyPOM.set(rec.i, rec.p);
+          byCanPOM.set(rec.c, rec.p);
+        }
+        // Alternate canonical forms of molecules whose InChIKeys collide.
+        for (const can in d.alt) byCanPOM.set(can, d.alt[can]);
+      }).catch(() => {});
+    }
+    return pomPromise;
+  }
+
+  // Where a score falls in the distribution of that descriptor across the whole
+  // library, as a "top N%". Scores are uncalibrated and base rates differ by orders
+  // of magnitude between descriptors, so the rank matters as much as the value.
+  // POM.q[label] holds the 0th..100th percentile of the label, as 0-1000 ints.
+  function pomTopPercent(labelIdx, score) {
+    const arr = POM && POM.q && POM.q[labelIdx];
+    if (!arr) return null;
+    let lo = 0, hi = arr.length - 1;
+    if (score <= arr[0]) return 100;
+    if (score >= arr[hi]) return 0;
+    while (lo < hi - 1) {                    // arr is ascending
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] <= score) lo = mid; else hi = mid;
+    }
+    const span = arr[hi] - arr[lo];
+    return 100 - (lo + (span ? (score - arr[lo]) / span : 0));
+  }
+
+  function fmtTopPercent(p) {
+    if (p == null) return "";
+    if (p < 0.1) return "top 0.1%";
+    if (p < 10) return `top ${p.toFixed(1)}%`;
+    return `top ${Math.round(p)}%`;
+  }
+
+  const POM_SHOW = 8;        // descriptors listed per molecule
+  const POM_WEAK = 0.2;      // below this, flag the whole profile as low-confidence
+
+  function renderOpenPOM(ikey, canon) {
+    const box = $("openpom-box");
+    if (!box) return;
+    const seq = ++pSeq;
+    box.innerHTML = `<p class="hint" style="margin:0">Loading predicted descriptors…</p>`;
+    ensureOpenPOM().then(() => {
+      if (seq !== pSeq) return; // a newer molecule was analyzed; skip stale write
+      const p = (ikey && byKeyPOM.get(ikey)) || byCanPOM.get(canon) || null;
+      if (!p || !POM) {
+        box.innerHTML =
+          `<p class="hint" style="margin:0">No OpenPOM prediction is available for this ` +
+          `molecule. Predictions are precomputed for a fixed molecule set for now.</p>`;
+        return;
+      }
+      // "odorless" is a meta-label, not an odor character — report it separately.
+      const odorlessIdx = POM.labels.indexOf("odorless");
+      const odorlessHit = p.find((e) => e[0] === odorlessIdx);
+      const chars = p.filter((e) => e[0] !== odorlessIdx).slice(0, POM_SHOW);
+
+      const rows = chars.map(([j, v]) => {
+        const s = v / 1000;
+        return `<div class="pom-row">` +
+          `<span class="pom-name">${escapeHtml(POM.labels[j])}</span>` +
+          `<span class="pom-bar"><i style="width:${(s * 100).toFixed(1)}%"></i></span>` +
+          `<span class="pom-val">${s.toFixed(2)}</span>` +
+          `<span class="pom-pct">${fmtTopPercent(pomTopPercent(j, v))}</span>` +
+        `</div>`;
+      }).join("");
+
+      // When "odorless" outranks every character label, say so up front — otherwise a
+      // ranked list of odor characters overstates a molecule the model thinks has none.
+      const odorlessTop = p[0][0] === odorlessIdx;
+      const weak = !chars.length || chars[0][1] / 1000 < POM_WEAK;
+      const lead = weak
+        ? `<p class="hint" style="margin:0 0 10px">No descriptor scores highly for this ` +
+          `molecule — the model gives it no confident odor character.</p>`
+        : `<p class="verdict-line" style="margin:0 0 10px">` +
+          (odorlessTop ? "Predicted odor character, if any:" : "Predicted odor character:") +
+          `</p>`;
+      const odorless = odorlessHit
+        ? `<p class="hint" style="margin:${odorlessTop ? "0 0 12px" : "12px 0 0"}">OpenPOM ` +
+          `<em>odorless</em> score: <strong>${(odorlessHit[1] / 1000).toFixed(2)}</strong> ` +
+          `(${fmtTopPercent(pomTopPercent(odorlessIdx, odorlessHit[1]))} of the library)` +
+          (odorlessTop ? " — the model's highest-scoring label for this molecule." : ".") +
+          `</p>`
+        : "";
+      const list = `<div class="pom-list">${rows}</div>`;
+      box.innerHTML = (odorlessTop ? odorless + lead + list : lead + list + odorless) +
+        `<p class="hint" style="margin:12px 0 0">Model scores are uncalibrated, so each is ` +
+        `also given as its rank among the ${POM.meta.n.toLocaleString()} molecules ` +
+        `OpenPOM was run over.</p>`;
+    });
   }
 
   // ---- Odor quality (lookup only, lazy-loaded) ----

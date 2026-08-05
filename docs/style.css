@@ -103,6 +103,26 @@ button:disabled{opacity:.5;cursor:default}
 .qtable tr:last-child td{border-bottom:none}
 .qtable td:first-child{color:var(--accent);font-weight:600;white-space:nowrap;padding-right:16px;width:1%}
 
+/* Sub-sections within a card (predicted vs reported odor quality). */
+.card h4.sub{margin:0 0 4px;font-size:.98rem;letter-spacing:.01em}
+.card h4.sub small{color:var(--muted);font-weight:400}
+.card h4.sub + .hint{margin-bottom:.9rem}
+.card h4.sub ~ h4.sub{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+
+/* OpenPOM predicted-descriptor list: name, score bar, value, library rank. */
+.pom-list{display:flex;flex-direction:column;gap:7px}
+.pom-row{display:grid;grid-template-columns:8.5em 1fr 3em 5.5em;gap:10px;align-items:center;font-size:.93rem}
+.pom-name{color:var(--accent);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pom-bar{height:9px;background:#0c141c;border-radius:6px;overflow:hidden}
+.pom-bar > i{display:block;height:100%;background:linear-gradient(90deg,var(--odorless),var(--odor))}
+.pom-val,.pom-pct{font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;font-size:.85rem}
+.pom-val{text-align:right}
+.pom-pct{color:var(--muted);text-align:right}
+@media(max-width:560px){
+  .pom-row{grid-template-columns:7em 1fr 3em}
+  .pom-pct{grid-column:2 / -1;text-align:left;margin-top:-4px}
+}
+
 .prob-bar{height:10px;background:#0c141c;border-radius:6px;overflow:hidden;margin:8px 0 4px}
 .prob-bar > div{height:100%;background:linear-gradient(90deg,var(--odorless),var(--odor))}
 
