@@ -136,6 +136,11 @@ button:disabled{opacity:.5;cursor:default}
 .about{font-size:.97rem}
 .about ul{padding-left:20px}
 .about li{margin:.4rem 0}
+
+.refs{padding-left:22px;font-size:.9rem;margin:0}
+.refs li{margin:.7rem 0;line-height:1.5}
+.refs li::marker{color:var(--muted)}
+.ref-use{display:block;color:var(--muted);font-size:.86rem;margin-top:2px}
 .disclaimer{color:var(--muted);font-size:.88rem;border-top:1px solid var(--line);padding-top:14px;margin-top:16px}
 
 .site-footer{border-top:1px solid var(--line);padding:24px 0 50px;color:var(--muted);font-size:.85rem;text-align:center}

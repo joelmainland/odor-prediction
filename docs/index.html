@@ -92,7 +92,8 @@
       <h4 class="sub">Predicted <small>— OpenPOM model</small></h4>
       <p class="hint">Odor-character descriptors predicted from structure by
         <a href="https://github.com/BioMachineLearning/openpom" target="_blank" rel="noopener">OpenPOM</a>,
-        an open implementation of the Principal Odor Map graph neural network.</p>
+        an open implementation of the Principal Odor Map graph neural network. Works for any
+        molecule — the network runs in your browser when a molecule isn't precomputed.</p>
       <div id="openpom-box"></div>
 
       <h4 class="sub">Reported <small>— published atlases</small></h4>
@@ -137,7 +138,7 @@
       <strong>Threshold of Toxicological Concern (TTC)</strong>. The TTC is assigned from the molecule's
       <strong>Cramer class</strong> or a mutagenicity structural alert; the per-sniff inhaled mass is
       estimated from vapor pressure and molecular weight assuming a 0.5&nbsp;L average sniff
-      (<a href="https://doi.org/10.1016/0031-9384(83)90104-0" target="_blank" rel="noopener">Laing 1983</a>).
+      (<a href="https://doi.org/10.1068/p120099" target="_blank" rel="noopener">Laing 1983</a>).
       The inhalation-exposure framing follows
       <a href="https://doi.org/10.3390/toxics13100902" target="_blank" rel="noopener">Mohar&nbsp;et&nbsp;al., <em>Toxics</em> 2025</a>.
       This figure is a deliberately conservative, comparative reference — <strong>not</strong> a safety
@@ -150,8 +151,10 @@
       an open re-implementation of the Principal Odor Map message-passing neural network of
       <a href="https://doi.org/10.1126/science.ade4401" target="_blank" rel="noopener">Lee&nbsp;et&nbsp;al.,
       <em>Science</em> 2023</a>, which maps a molecular graph onto 138 odor-character labels.
-      The model was run over a fixed molecule set and the results are looked up here, so
-      predictions currently appear only for those molecules. Its outputs are
+      Results for 10,269 molecules are precomputed and looked up. For any other molecule the
+      network itself — a message-passing GNN with a set2set readout, 2.1&nbsp;million parameters —
+      is downloaded and <strong>run in your browser</strong>, taking about 20&nbsp;ms per molecule.
+      Its outputs are
       <strong>uncalibrated</strong> — a score of 0.4 means something very different for a common
       label like <em>sweet</em> than for a rare one like <em>vetiver</em> — so each score is also
       shown as its rank among all molecules the model was run over. These are model
@@ -165,6 +168,46 @@
       Sigma-Aldrich and AromaDB. These are looked up per molecule, not predicted, so they appear only
       for molecules already characterized in those sources.
     </p>
+    <h3>References</h3>
+    <ol class="refs">
+      <li>Mayhew&nbsp;EJ, Arayata&nbsp;CJ, Gerkin&nbsp;RC, Lee&nbsp;BK, Magill&nbsp;JM, Snyder&nbsp;LL,
+        Little&nbsp;KA, Yu&nbsp;CW, Mainland&nbsp;JD. Transport features predict if a molecule is
+        odorous. <em>Proc Natl Acad Sci USA</em> 119(15):e2116576119 (2022).
+        <a href="https://doi.org/10.1073/pnas.2116576119" target="_blank" rel="noopener">doi:10.1073/pnas.2116576119</a>
+        <span class="ref-use">— odor/odorless rule of three, transport boundary model, transport-ML probabilities</span></li>
+
+      <li>Lee&nbsp;BK, Mayhew&nbsp;EJ, Sanchez-Lengeling&nbsp;B, Wei&nbsp;JN, Qian&nbsp;WW,
+        Little&nbsp;KA, Andres&nbsp;M, Nguyen&nbsp;BB, Moloy&nbsp;T, Yasonik&nbsp;J, Parker&nbsp;JK,
+        Gerkin&nbsp;RC, Mainland&nbsp;JD, Wiltschko&nbsp;AB. A principal odor map unifies diverse
+        tasks in human olfactory perception. <em>Science</em> 381:999–1006 (2023).
+        <a href="https://doi.org/10.1126/science.ade4401" target="_blank" rel="noopener">doi:10.1126/science.ade4401</a>
+        <span class="ref-use">— the model behind the predicted odor-quality descriptors</span></li>
+
+      <li>Barsainyan&nbsp;AA, Kumar&nbsp;R, Saha&nbsp;P, Schmuker&nbsp;M. OpenPOM — Open Principal
+        Odor Map (2023).
+        <a href="https://github.com/BioMachineLearning/openpom" target="_blank" rel="noopener">github.com/BioMachineLearning/openpom</a>
+        <span class="ref-use">— the open implementation and trained weights actually used here</span></li>
+
+      <li>Mohar&nbsp;I, Hansen&nbsp;BC, Hollowed&nbsp;DM, Mainland&nbsp;JD. Framework for in silico
+        toxicity screening of novel odorants. <em>Toxics</em> 13(10):902 (2025).
+        <a href="https://doi.org/10.3390/toxics13100902" target="_blank" rel="noopener">doi:10.3390/toxics13100902</a>
+        <span class="ref-use">— the TTC / inhalation-exposure framing</span></li>
+
+      <li>Laing&nbsp;DG. Natural sniffing gives optimum odour perception for humans.
+        <em>Perception</em> 12(2):99–117 (1983).
+        <a href="https://doi.org/10.1068/p120099" target="_blank" rel="noopener">doi:10.1068/p120099</a>
+        <span class="ref-use">— human sniff volume</span></li>
+
+      <li>Hamel&nbsp;EA, Castro&nbsp;JB, Gould&nbsp;TJ, Pellegrino&nbsp;R, Liang&nbsp;Z,
+        Coleman&nbsp;LA, Patel&nbsp;F, Wallace&nbsp;DS, Bhatnagar&nbsp;T, Mainland&nbsp;JD,
+        Gerkin&nbsp;RC. Pyrfume: a window to the world's olfactory data.
+        <em>Sci Data</em> 11:1220 (2024).
+        <a href="https://doi.org/10.1038/s41597-024-04051-z" target="_blank" rel="noopener">doi:10.1038/s41597-024-04051-z</a>
+        <span class="ref-use">— aggregation of the published odor atlases listed above
+        (Leffingwell, The Good Scents Company, Arctander 1960, IFRA 2019, Dravnieks 1985,
+        Sigma-Aldrich, AromaDB), each credited to its original compilers</span></li>
+    </ol>
+
     <p class="disclaimer">
       For research and educational use. Predictions are estimates of odor <em>class</em>, not odor
       quality or intensity, and can be wrong — especially for molecules unlike those in the training set.

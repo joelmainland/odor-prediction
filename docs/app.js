@@ -266,7 +266,11 @@
     renderBasis(rule, datasetProb, hit, flags);
     renderTransport(current, false);
     renderToxicity(ikey, canon);
-    renderOpenPOM(ikey, canon);
+    // The mol is deleted as soon as analyze() returns, so capture the graph now —
+    // the OpenPOM worker may need it after an async weight download.
+    let molJson = null;
+    try { molJson = mol.get_json(); } catch (e) {}
+    renderOpenPOM(ikey, canon, molJson);
     renderQuality(ikey, canon);
   }
 
@@ -315,8 +319,50 @@
 
   const POM_SHOW = 8;        // descriptors listed per molecule
   const POM_WEAK = 0.2;      // below this, flag the whole profile as low-confidence
+  const POM_KEEP = 15;       // descriptors kept from a live prediction (matches the table)
 
-  function renderOpenPOM(ikey, canon) {
+  // ---- Live inference (pom-worker.js) ----
+  // For molecules outside the precomputed table, run the model itself. The weights
+  // are ~8 MB, so the worker is only created — and the download only started — when
+  // a molecule actually misses the lookup.
+  let pomWorker = null, pomJobSeq = 0, pomModelReady = false;
+  const pomJobs = new Map();
+
+  function pomPredict(molJson) {
+    return new Promise((resolve, reject) => {
+      if (!pomWorker) {
+        try {
+          pomWorker = new Worker("pom-worker.js");
+        } catch (e) { reject(e); return; }
+        pomWorker.onmessage = (ev) => {
+          const job = pomJobs.get(ev.data.seq);
+          if (!job) return;
+          pomJobs.delete(ev.data.seq);
+          if (ev.data.error) return job.reject(new Error(ev.data.error));
+          pomModelReady = true;
+          job.resolve(ev.data.probs);
+        };
+        pomWorker.onerror = (e) => {
+          for (const [, job] of pomJobs) job.reject(new Error(e.message || "worker failed"));
+          pomJobs.clear();
+          pomWorker = null;
+        };
+      }
+      const seq = ++pomJobSeq;
+      pomJobs.set(seq, { resolve, reject });
+      pomWorker.postMessage({ seq, json: molJson, base: "data/" });
+    });
+  }
+
+  // Model output (138 probabilities) -> the same [labelIdx, score0-1000] shape the
+  // lookup table uses, so both paths render through one code path.
+  function pomProbsToEntries(probs) {
+    const idx = Array.from({ length: probs.length }, (_, i) => i);
+    idx.sort((a, b) => probs[b] - probs[a]);
+    return idx.slice(0, POM_KEEP).map((j) => [j, Math.round(probs[j] * 1000)]);
+  }
+
+  function renderOpenPOM(ikey, canon, molJson) {
     const box = $("openpom-box");
     if (!box) return;
     const seq = ++pSeq;
@@ -324,12 +370,36 @@
     ensureOpenPOM().then(() => {
       if (seq !== pSeq) return; // a newer molecule was analyzed; skip stale write
       const p = (ikey && byKeyPOM.get(ikey)) || byCanPOM.get(canon) || null;
-      if (!p || !POM) {
-        box.innerHTML =
-          `<p class="hint" style="margin:0">No OpenPOM prediction is available for this ` +
-          `molecule. Predictions are precomputed for a fixed molecule set for now.</p>`;
+      if (p && POM) return renderPomEntries(box, seq, p, "lookup");
+
+      if (!POM) {
+        box.innerHTML = `<p class="hint" style="margin:0">Odor-quality predictions are ` +
+          `unavailable right now.</p>`;
         return;
       }
+      if (!molJson) {
+        box.innerHTML = `<p class="hint" style="margin:0">Could not read this molecule's ` +
+          `structure, so no prediction was run.</p>`;
+        return;
+      }
+      // Not in the precomputed table — run the model in the browser.
+      box.innerHTML = `<p class="hint" style="margin:0">` + (pomModelReady
+        ? "Running the OpenPOM model…"
+        : "This molecule isn't in the precomputed set, so the model is running here in " +
+          "your browser. Downloading it (~8 MB, first time only)…") + `</p>`;
+      pomPredict(molJson).then((probs) => {
+        if (seq !== pSeq) return;
+        renderPomEntries(box, seq, pomProbsToEntries(probs), "predicted");
+      }).catch((err) => {
+        if (seq !== pSeq) return;
+        box.innerHTML = `<p class="hint" style="margin:0">Couldn't run the OpenPOM model ` +
+          `for this molecule (${escapeHtml(err.message || "error")}).</p>`;
+      });
+    });
+  }
+
+  function renderPomEntries(box, seq, p, source) {
+      if (seq !== pSeq) return;
       // "odorless" is a meta-label, not an odor character — report it separately.
       const odorlessIdx = POM.labels.indexOf("odorless");
       const odorlessHit = p.find((e) => e[0] === odorlessIdx);
@@ -363,11 +433,16 @@
           `</p>`
         : "";
       const list = `<div class="pom-list">${rows}</div>`;
+      const n = POM.meta.n.toLocaleString();
+      const provenance = source === "predicted"
+        ? `<p class="hint" style="margin:12px 0 0"><span class="tag dataset">computed here</span> ` +
+          `This molecule isn't in the precomputed set, so the model ran in your browser. ` +
+          `Scores are uncalibrated, so each is also ranked against the ${n} molecules ` +
+          `OpenPOM was run over.</p>`
+        : `<p class="hint" style="margin:12px 0 0">Model scores are uncalibrated, so each is ` +
+          `also given as its rank among the ${n} molecules OpenPOM was run over.</p>`;
       box.innerHTML = (odorlessTop ? odorless + lead + list : lead + list + odorless) +
-        `<p class="hint" style="margin:12px 0 0">Model scores are uncalibrated, so each is ` +
-        `also given as its rank among the ${POM.meta.n.toLocaleString()} molecules ` +
-        `OpenPOM was run over.</p>`;
-    });
+        provenance;
   }
 
   // ---- Odor quality (lookup only, lazy-loaded) ----
