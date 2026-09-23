@@ -31,8 +31,9 @@
   let byKey = new Map();     // InChIKey -> record
   let byCan = new Map();     // canonical SMILES -> record
   let byFlat = new Map();    // InChIKey skeleton (first block) -> record, stereo-blind fallback
-  let byKeyTox = new Map();  // InChIKey -> toxicity record
-  let byCanTox = new Map();  // canonical SMILES -> toxicity record
+  let TOX = null;            // Toxtree hazard classes { meta, mols }
+  let byKeyTox = new Map();  // InChIKey -> { c, a, g }
+  let toxPromise = null;     // lazy-load promise for toxicity.json
   let byKeyQ = new Map();    // InChIKey -> odor-quality record
   let byCanQ = new Map();    // canonical SMILES -> odor-quality record
   let byNameQ = new Map();   // lower-case name -> odor-quality record (name-lookup fallback)
@@ -50,6 +51,7 @@
   let iSeq = 0;              // guards async intensity renders against races
   let PHYS = null;           // shared VP / logP table { meta, mols }
   let byKeyPhys = new Map(); // InChIKey -> { v, vs, l, ls }
+  let byFlatPhys = new Map(); // InChIKey skeleton -> best record, stereo-blind fallback
   let physPromise = null;    // lazy-load promise for physchem.json
   let aSeq = 0;              // analysis counter
   let current = null;        // evidence for the molecule on screen (see analyze)
@@ -79,13 +81,6 @@
         }
       }
     }),
-    // Toxicity reference set is optional — degrade gracefully if it fails.
-    fetch("data/toxicity.json").then((r) => r.json()).then((d) => {
-      for (const rec of d) {
-        if (rec.ikey) byKeyTox.set(rec.ikey, rec);
-        if (rec.can) byCanTox.set(rec.can, rec);
-      }
-    }).catch(() => {}),
   ]).then(() => {
     const btn = $("predict");
     btn.disabled = false;
@@ -110,6 +105,7 @@
     current.manual = { vp: mv > 0 ? mv : null, logp: isNaN(ml) ? null : ml };
     renderProps(current);
     renderOdor(current);
+    renderToxicity(current);
   });
 
   async function run() {
@@ -276,14 +272,14 @@
     const ctx = current;
     Promise.all([ensurePhyschem(), ensureQuality()]).then(() => {
       if (ctx !== current) return;
-      ctx.phys = (ikey && byKeyPhys.get(ikey)) || null;
+      ctx.phys = lookupPhys(ikey);
       const q = (ikey && byKeyQ.get(ikey)) || byCanQ.get(canon) || null;
       ctx.atlas = atlasEvidence(q);
       renderProps(ctx);
       renderOdor(ctx);
     });
 
-    renderToxicity(ikey, canon);
+    renderToxicity(ctx);
     renderIntensity(ikey, canon);
     // The mol is deleted as soon as analyze() returns, so capture the graph now —
     // the OpenPOM worker may need it after an async weight download.
@@ -317,10 +313,33 @@
     if (!physPromise) {
       physPromise = fetch("data/physchem.json").then((r) => r.json()).then((d) => {
         PHYS = d;
-        for (const rec of d.mols) byKeyPhys.set(rec.i, rec);
+        // CompTox often lists only specific stereoisomers (e.g. (R)-2-nonanol) while
+        // the site has the unspecified form. VP and logP are stereo-insensitive
+        // (siblings differ by <=0.7 log units), so fall back to the skeleton,
+        // preferring measured values.
+        const rank = (r) => (r.v == null ? 0 : r.vs === "p" ? 1 : 2);
+        for (const rec of d.mols) {
+          byKeyPhys.set(rec.i, rec);
+          const f = rec.i.split("-")[0], cur = byFlatPhys.get(f);
+          if (!cur || rank(rec) > rank(cur)) byFlatPhys.set(f, rec);
+        }
       }).catch(() => {});
     }
     return physPromise;
+  }
+
+  function lookupPhys(ikey) {
+    if (!ikey) return null;
+    const exact = byKeyPhys.get(ikey);
+    if (exact) return exact;
+    const sib = byFlatPhys.get(ikey.split("-")[0]);
+    return sib ? { ...sib, stereo: true } : null;
+  }
+
+  // Human-readable source of a physchem.json value, e.g. "CompTox experimental".
+  function physSource(phys, key) {
+    const s = ((PHYS && PHYS.meta.src) || {})[phys[key]] || "";
+    return phys.stereo ? `${s}, other stereoisomer` : s;
   }
 
   const LOGP_CRIPPEN = "computed from structure (Crippen)";
@@ -332,17 +351,16 @@
   // transport boundaries were fit on the paper's dataset values, so those win.
   function transportInputs(ctx) {
     const { hit, desc, phys, manual } = ctx;
-    const src = (PHYS && PHYS.meta.src) || {};
     const o = { vp: null, vpSource: "", vpPredicted: false, logp: null, logpSource: "", logpFit: false };
     if (manual && manual.vp != null) { o.vp = manual.vp; o.vpSource = "your value"; }
     else if (hit && hit.vp != null) { o.vp = hit.vp; o.vpSource = "Mayhew et al. dataset"; }
     else if (phys && phys.v != null) {
-      o.vp = phys.v; o.vpSource = src[phys.vs] || ""; o.vpPredicted = phys.vs === "p";
+      o.vp = phys.v; o.vpSource = physSource(phys, "vs"); o.vpPredicted = phys.vs === "p";
     }
     if (manual && manual.logp != null) { o.logp = manual.logp; o.logpSource = "your value"; }
     else if (hit && hit.logp != null) {
       o.logp = hit.logp; o.logpSource = "Mayhew et al. dataset (Moriguchi)"; o.logpFit = true;
-    } else if (phys && phys.l != null) { o.logp = phys.l; o.logpSource = src[phys.ls] || ""; }
+    } else if (phys && phys.l != null) { o.logp = phys.l; o.logpSource = physSource(phys, "ls"); }
     else if (desc.logp != null) { o.logp = desc.logp; o.logpSource = LOGP_CRIPPEN; }
     return o;
   }
@@ -962,20 +980,60 @@
       `</svg>`;
   }
 
-  // ---- Toxicity reference (lookup only) ----
-  // TTC hierarchy (Kroes/Munro; matches the R app's README, not its code):
-  // a genotoxicity alert takes precedence over the Cramer class.
-  function toxTTC(rec) {
-    if (rec.gradient === "Mutagen") return 1.5;
-    if (rec.mutagen === "NO") return 1.5;   // "NO" = Ames structural alert present
-    return TTC_BY_CRAMER[rec.cramer] != null ? TTC_BY_CRAMER[rec.cramer] : null;
+  // ---- Toxicity reference (Toxtree lookup) ----
+  // toxicity.json holds Toxtree's classes for every molecule the site knows (see
+  // scripts/build_toxicity.py). TTC hierarchy (Kroes/Munro; the R app's README, not
+  // its code): a mutagenicity alert -- Ames (ISS) or the Gradient rules -- wins, then a
+  // Gradient supplemental class, then the Revised Cramer class.
+  let byFlatTox = new Map(); // InChIKey skeleton -> most conservative record
+  function ensureTox() {
+    if (!toxPromise) {
+      toxPromise = fetch("data/toxicity.json").then((r) => r.json()).then((d) => {
+        TOX = d;
+        for (const rec of d.mols) {
+          byKeyTox.set(rec.i, rec);
+          // The trees ignore stereochemistry, so a stereo-specific query can use the
+          // unspecified form's classes.
+          const f = rec.i.split("-")[0], cur = byFlatTox.get(f);
+          if (!cur || toxTTC(rec) < toxTTC(cur)) byFlatTox.set(f, rec);
+        }
+      }).catch(() => {});
+    }
+    return toxPromise;
   }
 
-  function sniffsToTTC(rec) {
-    const ttc = toxTTC(rec);
-    if (ttc == null || !(rec.vp > 0) || !(rec.mw > 0)) return null;
+  function toxTTC(rec) {
+    if (rec.g === "m" || rec.a) return 1.5;
+    if (TTC_BY_CRAMER[rec.g] != null) return TTC_BY_CRAMER[rec.g];
+    return TTC_BY_CRAMER[rec.c] != null ? TTC_BY_CRAMER[rec.c] : null;
+  }
+
+  function toxBasis(rec) {
+    if (rec.a) {
+      const names = rec.a.map((id) => (TOX.meta.sa || {})[id] || id);
+      return `a structural alert for mutagenicity (Ames, ISS): ${names.map(escapeHtml).join("; ")}`;
+    }
+    if (rec.g === "m") return "a Gradient supplemental rule flagging it as a mutagen";
+    if (rec.g) {
+      const cr = rec.c && rec.c !== rec.g ? `; the Revised Cramer tree alone gives ${CRAMER_LABEL[rec.c]}` : "";
+      return `a Gradient supplemental rule, ${CRAMER_LABEL[rec.g]}${cr}`;
+    }
+    return `the Revised Cramer tree, ${CRAMER_LABEL[rec.c]}`;
+  }
+
+  // Vapor pressure for the sniff count: your value > CompTox > Mayhew dataset.
+  function toxVP(ctx) {
+    if (ctx.manual && ctx.manual.vp != null) return { vp: ctx.manual.vp, src: "your value", pred: false };
+    const phys = lookupPhys(ctx.ikey);
+    if (phys && phys.v != null) return { vp: phys.v, src: physSource(phys, "vs"), pred: phys.vs === "p" };
+    if (ctx.hit && ctx.hit.vp != null) return { vp: ctx.hit.vp, src: "Mayhew et al. dataset", pred: false };
+    return null;
+  }
+
+  function sniffsToTTC(ttc, vp, mw) {
+    if (ttc == null || !(vp > 0) || !(mw > 0)) return null;
     // µg of saturated (neat) headspace inhaled per 0.5 L sniff.
-    const massPerSniff = (rec.vp * SNIFF_L / (TOX_R * TOX_T)) * rec.mw * 1e6;
+    const massPerSniff = (vp * SNIFF_L / (TOX_R * TOX_T)) * mw * 1e6;
     return { ttc, massPerSniff, sniffs: ttc / massPerSniff };
   }
 
@@ -994,44 +1052,58 @@
     return String(Number(x.toPrecision(4)));
   }
 
-  function renderToxicity(ikey, canon) {
+  function renderToxicity(ctx) {
     const box = $("tox-box");
     if (!box) return;
-    const rec = (ikey && byKeyTox.get(ikey)) || byCanTox.get(canon) || null;
-    if (!rec) {
+    if (!TOX) box.innerHTML = `<p class="hint" style="margin:0">Looking up hazard classes…</p>`;
+    Promise.all([ensurePhyschem(), ensureTox()]).then(() => {
+      if (ctx !== current) return;
+      if (!TOX) {
+        box.innerHTML = `<p class="hint" style="margin:0">The toxicological reference table could not be loaded.</p>`;
+        return;
+      }
+      const { ikey } = ctx;
+      const rec = (ikey && (byKeyTox.get(ikey) || byFlatTox.get(ikey.split("-")[0]))) || null;
+      if (!rec) {
+        box.innerHTML =
+          `<p class="hint" style="margin:0">This molecule hasn't been run through Toxtree yet, ` +
+          `so no TTC figure is shown. (Lookup only for now — a predictive version is planned.)</p>`;
+        return;
+      }
+      const ttc = toxTTC(rec);
+      if (ttc == null) {
+        box.innerHTML = `<p class="hint" style="margin:0">Toxtree could not classify this molecule, so no TTC figure is shown.</p>`;
+        return;
+      }
+      const basis = `TTC = ${ttc} µg/person/day, from ${toxBasis(rec)}.`;
+      const v = toxVP(ctx);
+      const r = v && sniffsToTTC(ttc, v.vp, ctx.desc.mw);
+      let lead, detail;
+      if (!r) {
+        lead = "No vapor pressure available, so the sniff count can't be computed";
+        detail = `${basis} Enter a vapor pressure above to compute it.`;
+      } else {
+        const count = fmtSniffs(r.sniffs);
+        lead = r.sniffs < 1
+          ? `A single sniff of the neat headspace already exceeds its TTC (equivalent to ~${count} sniffs)`
+          : `Reaches its TTC after <strong>${count}</strong> sniff${r.sniffs === 1 ? "" : "s"} of neat headspace`;
+        detail = `${basis} Vapor pressure = ${fmtSci(v.vp)} mmHg (${escapeHtml(v.src)}); a 0.5 L sniff ` +
+          `of the saturated headspace carries ~${fmtSci(r.massPerSniff)} µg.` +
+          (v.pred ? ` Predicted vapor pressures can be off by 10× or more, and the sniff count scales with it.` : "");
+      }
       box.innerHTML =
-        `<p class="hint" style="margin:0">This molecule isn't in the toxicological reference set, ` +
-        `so no TTC figure is shown. (Lookup only for now — a predictive version is planned.)</p>`;
-      return;
-    }
-    const r = sniffsToTTC(rec);
-    if (!r) {
-      box.innerHTML = `<p class="hint" style="margin:0">Insufficient data to compute a TTC reference for this molecule.</p>`;
-      return;
-    }
-    const alert = rec.mutagen === "NO";
-    const basis = alert
-      ? "a structural alert for mutagenicity (Ames)"
-      : `Cramer ${CRAMER_LABEL[rec.cramer] || rec.cramer}`;
-    const count = fmtSniffs(r.sniffs);
-    const lead = r.sniffs < 1
-      ? `A single sniff of the neat headspace already exceeds its TTC (equivalent to ~${count} sniffs)`
-      : `Reaches its TTC after <strong>${count}</strong> sniff${r.sniffs === 1 ? "" : "s"} of neat headspace`;
-    box.innerHTML =
-      `<div class="model" style="border:none;padding-top:0">` +
-      `<div class="name">${lead} <span class="tag dataset">dataset</span></div>` +
-      `<div class="verdict-line">` +
-      `TTC = ${r.ttc} µg/person/day, from ${basis}. ` +
-      `Vapor pressure = ${fmtSci(rec.vp)} mmHg; a 0.5 L sniff of the saturated headspace carries ~${fmtSci(r.massPerSniff)} µg.` +
-      `</div>` +
-      `<div class="verdict-line" style="color:var(--muted)">A comparative reference point only — it counts how many sniffs of ` +
-      `undiluted headspace would together equal the daily Threshold of Toxicological Concern. Not a safety determination, ` +
-      `exposure limit, or recommendation.</div>` +
-      `<div class="verdict-line" style="color:var(--muted)">The TTC is a generic screening threshold for chemicals ` +
-      `without their own toxicity data, and is generally <strong>conservative</strong>. Where a molecule has ` +
-      `substance-specific toxicological data, those data take precedence over this figure — they usually allow more ` +
-      `exposure than the TTC, but not always.</div>` +
-      `</div>`;
+        `<div class="model" style="border:none;padding-top:0">` +
+        `<div class="name">${lead} <span class="tag dataset">Toxtree</span></div>` +
+        `<div class="verdict-line">${detail}</div>` +
+        `<div class="verdict-line" style="color:var(--muted)">A comparative reference point only — it counts how many sniffs of ` +
+        `undiluted headspace would together equal the daily Threshold of Toxicological Concern. Not a safety determination, ` +
+        `exposure limit, or recommendation.</div>` +
+        `<div class="verdict-line" style="color:var(--muted)">The TTC is a generic screening threshold for chemicals ` +
+        `without their own toxicity data, and is generally <strong>conservative</strong>. Structural alerts are ` +
+        `screening flags, not test results. Where a molecule has substance-specific toxicological data, those data ` +
+        `take precedence over this figure — they usually allow more exposure than the TTC, but not always.</div>` +
+        `</div>`;
+    });
   }
 
   function ruleOfThree(desc) {

@@ -14,3 +14,6 @@ venv/
 
 # API response caches
 scripts/cache/
+
+# Toxtree jars (~100 MB) — see scripts/run_toxtree.sh for how to obtain
+scripts/vendor/
