@@ -30,10 +30,12 @@
   let DATA = null;           // array of molecule records
   let byKey = new Map();     // InChIKey -> record
   let byCan = new Map();     // canonical SMILES -> record
+  let byFlat = new Map();    // InChIKey skeleton (first block) -> record, stereo-blind fallback
   let byKeyTox = new Map();  // InChIKey -> toxicity record
   let byCanTox = new Map();  // canonical SMILES -> toxicity record
   let byKeyQ = new Map();    // InChIKey -> odor-quality record
   let byCanQ = new Map();    // canonical SMILES -> odor-quality record
+  let byNameQ = new Map();   // lower-case name -> odor-quality record (name-lookup fallback)
   let qualPromise = null;    // lazy-load promise for quality.json (1.1 MB)
   let qSeq = 0;              // guards async quality renders against races
   let POM = null;            // OpenPOM prediction table { labels, q, mols, alt }
@@ -46,7 +48,11 @@
   let byCanInt = new Map();  // canonical SMILES -> same
   let intPromise = null;     // lazy-load promise for intensity.json
   let iSeq = 0;              // guards async intensity renders against races
-  let current = null;        // { mol data for manual recompute }
+  let PHYS = null;           // shared VP / logP table { meta, mols }
+  let byKeyPhys = new Map(); // InChIKey -> { v, vs, l, ls }
+  let physPromise = null;    // lazy-load promise for physchem.json
+  let aSeq = 0;              // analysis counter
+  let current = null;        // evidence for the molecule on screen (see analyze)
 
   const $ = (id) => document.getElementById(id);
   const statusEl = () => $("status");
@@ -65,6 +71,12 @@
       for (const rec of d) {
         if (rec.ikey) byKey.set(rec.ikey, rec);
         if (rec.can) byCan.set(rec.can, rec);
+        // Prefer the stereo-free entry for a skeleton. No skeleton in the dataset has
+        // stereoisomers with conflicting odor labels, so this fallback is safe.
+        if (rec.ikey) {
+          const f = rec.ikey.split("-")[0];
+          if (!byFlat.has(f) || rec.ikey.endsWith("-UHFFFAOYSA-N")) byFlat.set(f, rec);
+        }
       }
     }),
     // Toxicity reference set is optional — degrade gracefully if it fails.
@@ -93,7 +105,11 @@
     b.addEventListener("click", () => { $("query").value = b.dataset.q; run(); })
   );
   $("man-run").addEventListener("click", () => {
-    if (current) renderTransport(current, true);
+    if (!current) return;
+    const mv = parseFloat($("man-vp").value), ml = parseFloat($("man-logp").value);
+    current.manual = { vp: mv > 0 ? mv : null, logp: isNaN(ml) ? null : ml };
+    renderProps(current);
+    renderOdor(current);
   });
 
   async function run() {
@@ -111,6 +127,10 @@
     if (!mol) {
       try {
         const res = await lookupName(raw);
+        if (res && res.busy) {
+          setStatus("PubChem is busy right now, so the name couldn't be looked up. Try again in a moment, or enter a SMILES string.", true);
+          return;
+        }
         if (!res) { setStatus(`Couldn't parse "${raw}" as SMILES or find it by name.`, true); return; }
         smiles = res.smiles;
         displayName = res.name;
@@ -139,11 +159,24 @@
     } catch (e) { return null; }
   }
 
+  // Name -> { smiles, name }. PubChem first; if it doesn't know the name, fall back to
+  // the names in the site's own atlas table (it has trade names PubChem lacks, e.g.
+  // "Tween 20"). Returns { busy: true } if PubChem is throttling and nothing local matches.
   async function lookupName(name) {
     const base = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/";
-    const url = base + encodeURIComponent(name) + "/property/IsomericSMILES,Title/JSON";
-    const r = await fetch(url);
-    if (!r.ok) return null;
+    // PubChem name search ignores case; normalizing gives every spelling one URL (and one
+    // cache entry). A throttled 503 was seen to stick to one capitalization's URL.
+    const url = base + encodeURIComponent(name.trim().toLowerCase()) + "/property/IsomericSMILES,Title/JSON";
+    let r = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      r = await fetch(url);
+      if (r.status !== 503) break;             // PUGREST.ServerBusy: back off and retry
+      await new Promise((ok) => setTimeout(ok, 800 * (attempt + 1)));
+    }
+    if (!r.ok) {
+      const local = await localName(name);
+      return local || (r.status === 503 ? { busy: true } : null);
+    }
     const j = await r.json();
     const p = j && j.PropertyTable && j.PropertyTable.Properties && j.PropertyTable.Properties[0];
     if (!p) return null;
@@ -151,6 +184,12 @@
     const smi = p.IsomericSMILES || p.SMILES || p.ConnectivitySMILES || p.CanonicalSMILES;
     if (!smi) return null;
     return { smiles: smi, name: p.Title || name };
+  }
+
+  async function localName(name) {
+    await ensureQuality();
+    const rec = byNameQ.get(name.trim().toLowerCase());
+    return rec ? { smiles: rec.can, name: rec.name } : null;
   }
 
   // ---- Descriptor extraction ----
@@ -209,67 +248,41 @@
     const ikey = inchiKey(mol);
 
     // Dataset lookup (paper's curated 1,924 molecules).
+    // The dataset often stores molecules without stereo (sucrose, for one), while PubChem
+    // returns the stereo form -- so fall back to the InChIKey skeleton.
     let hit = (ikey && byKey.get(ikey)) || byCan.get(canon) || null;
+    let hitStereoBlind = false;
+    if (!hit && ikey && (hit = byFlat.get(ikey.split("-")[0]) || null)) hitStereoBlind = true;
 
     // Structure depiction
     try { $("structure-svg").innerHTML = mol.get_svg(230, 190); } catch (e) { $("structure-svg").innerHTML = ""; }
     $("mol-name").textContent = displayName ? displayName : canon;
 
-    // Properties table
-    const props = [
-      ["Molecular weight", fmt(desc.mw, 2) + " Da"],
-      ["logP (Crippen)", fmt(desc.logp, 2)],
-      ["Heteroatoms", desc.nhet == null ? "—" : String(desc.nhet)],
-      ["Heavy atoms", desc.heavy == null ? "—" : String(desc.heavy)],
-      ["Canonical SMILES", `<code>${escapeHtml(canon)}</code>`],
-    ];
-    if (hit) {
-      if (hit.vp != null) props.push(["Vapor pressure (dataset)", fmt(hit.vp, 4) + " mmHg"]);
-      if (hit.logp != null) props.push(["logP (dataset, Moriguchi)", fmt(hit.logp, 2)]);
-    }
-    $("props").innerHTML = props.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
-
-    // ---- Model verdicts ----
     const flags = structuralFlags(mol, canon);
     const rule = ruleOfThree(desc);
-    const datasetProb = hit ? hit.p : null;
 
-    // Store state for manual transport recompute
-    current = { desc, hit, canon };
+    // Everything the odor panel weighs. Physical properties and the published
+    // atlases arrive asynchronously; OpenPOM later still (it may run live).
+    current = { seq: ++aSeq, ikey, canon, desc, hit, hitStereoBlind, flags, rule,
+                phys: undefined, atlas: undefined, manual: null };
+    $("man-vp").value = ""; $("man-logp").value = "";
+    $("verdict").className = "verdict";
+    $("verdict").innerHTML = `<p class="hint" style="margin:0">Weighing the evidence…</p>`;
+    $("evidence").innerHTML = "";
+    $("transport-box").innerHTML = "";
+    renderProps(current);
+    $("result").classList.remove("hidden");
 
-    // Primary verdict priority: dataset transport-ML > rule of three.
-    let primary;
-    if (datasetProb != null) {
-      primary = {
-        odorous: datasetProb >= 0.5,
-        label: datasetProb >= 0.5 ? "Odorous" : "Odorless",
-        conf: `${Math.round(Math.max(datasetProb, 1 - datasetProb) * 100)}% confidence`,
-        source: "Transport-ML model (from the paper's dataset)",
-        maybe: false,
-      };
-    } else if (flags.salt || flags.inorganic) {
-      // The transport rule of three is validated only for organic molecules.
-      primary = {
-        odorous: false,
-        label: "Uncertain",
-        conf: flags.salt
-          ? "Salt / multi-component species — transport rules don't apply cleanly"
-          : "Inorganic / metal-containing — outside the model's chemical space",
-        source: "Rule of three not applicable",
-        maybe: true,
-      };
-    } else {
-      primary = {
-        odorous: rule.odorous,
-        label: rule.odorous ? "Probably odorous" : (rule.tooHeavyOrPolar ? "Probably odorless" : "Uncertain"),
-        conf: rule.odorous ? "Rule of three satisfied" : "Rule of three not satisfied",
-        source: "Rule of three (structure-only estimate)",
-        maybe: !rule.odorous && !rule.tooHeavyOrPolar,
-      };
-    }
-    renderVerdict(primary, hit);
-    renderBasis(rule, datasetProb, hit, flags);
-    renderTransport(current, false);
+    const ctx = current;
+    Promise.all([ensurePhyschem(), ensureQuality()]).then(() => {
+      if (ctx !== current) return;
+      ctx.phys = (ikey && byKeyPhys.get(ikey)) || null;
+      const q = (ikey && byKeyQ.get(ikey)) || byCanQ.get(canon) || null;
+      ctx.atlas = atlasEvidence(q);
+      renderProps(ctx);
+      renderOdor(ctx);
+    });
+
     renderToxicity(ikey, canon);
     renderIntensity(ikey, canon);
     // The mol is deleted as soon as analyze() returns, so capture the graph now —
@@ -278,6 +291,275 @@
     try { molJson = mol.get_json(); } catch (e) {}
     renderOpenPOM(ikey, canon, molJson);
     renderQuality(ikey, canon);
+  }
+
+  function renderProps(ctx) {
+    const { desc, canon } = ctx;
+    const t = transportInputs(ctx);
+    const props = [
+      ["Molecular weight", fmt(desc.mw, 2) + " Da"],
+      ["Heteroatoms", desc.nhet == null ? "—" : String(desc.nhet)],
+      ["Heavy atoms", desc.heavy == null ? "—" : String(desc.heavy)],
+      ["Vapor pressure (25 °C)", t.vp != null
+        ? `${fmtSci(t.vp)} mmHg<small class="src">${escapeHtml(t.vpSource)}</small>`
+        : (ctx.phys === undefined ? "…" : "—")],
+      ["logP", t.logp != null
+        ? `${fmt(t.logp, 2)}<small class="src">${escapeHtml(t.logpSource)}</small>` : "—"],
+    ];
+    if (t.logpSource !== LOGP_CRIPPEN && desc.logp != null)
+      props.push(["logP (computed)", `${fmt(desc.logp, 2)}<small class="src">${LOGP_CRIPPEN}</small>`]);
+    props.push(["Canonical SMILES", `<code>${escapeHtml(canon)}</code>`]);
+    $("props").innerHTML = props.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  }
+
+  // ---- Shared physical properties (physchem.json: CompTox OPERA VP + logP) ----
+  function ensurePhyschem() {
+    if (!physPromise) {
+      physPromise = fetch("data/physchem.json").then((r) => r.json()).then((d) => {
+        PHYS = d;
+        for (const rec of d.mols) byKeyPhys.set(rec.i, rec);
+      }).catch(() => {});
+    }
+    return physPromise;
+  }
+
+  const LOGP_CRIPPEN = "computed from structure (Crippen)";
+  // logP units below the low-volatility boundary beyond which physics overrides reports
+  // (larger when the vapor pressure is itself a prediction). See odorVerdict.
+  const INVOLATILE = 3, INVOLATILE_PRED = 5;
+
+  // Best available vapor pressure and logP, each with where it came from. The
+  // transport boundaries were fit on the paper's dataset values, so those win.
+  function transportInputs(ctx) {
+    const { hit, desc, phys, manual } = ctx;
+    const src = (PHYS && PHYS.meta.src) || {};
+    const o = { vp: null, vpSource: "", vpPredicted: false, logp: null, logpSource: "", logpFit: false };
+    if (manual && manual.vp != null) { o.vp = manual.vp; o.vpSource = "your value"; }
+    else if (hit && hit.vp != null) { o.vp = hit.vp; o.vpSource = "Mayhew et al. dataset"; }
+    else if (phys && phys.v != null) {
+      o.vp = phys.v; o.vpSource = src[phys.vs] || ""; o.vpPredicted = phys.vs === "p";
+    }
+    if (manual && manual.logp != null) { o.logp = manual.logp; o.logpSource = "your value"; }
+    else if (hit && hit.logp != null) {
+      o.logp = hit.logp; o.logpSource = "Mayhew et al. dataset (Moriguchi)"; o.logpFit = true;
+    } else if (phys && phys.l != null) { o.logp = phys.l; o.logpSource = src[phys.ls] || ""; }
+    else if (desc.logp != null) { o.logp = desc.logp; o.logpSource = LOGP_CRIPPEN; }
+    return o;
+  }
+
+  // ---- Reported odor / odorless (published atlases) ----
+  // A source counts as reporting "odorless" only if that is all it says; one that
+  // lists "odorless" alongside descriptors still describes an odor. AromaDB's
+  // "no aroma" is ignored outright: it is attached to indole, acetophenone, octanoic
+  // acid and ~50 other plainly odorous molecules, so it reads as a no-data placeholder.
+  const ODORLESS_TERMS = /\b(odou?rless|no (apparent |distinct |perceptible )?(odou?r|smell)|none|bland)\b/gi;
+  const isPlaceholder = (src, text) => src === "AromaDB" && String(text).trim().toLowerCase() === "no aroma";
+  const DESC_STOP = new Set(["like", "and", "with", "slight", "slightly", "very", "mild", "faint", "odor", "note", "notes"]);
+
+  function atlasEvidence(rec) {
+    if (!rec) return null;
+    const odor = [], none = [], seen = new Map();
+    let ignored = null;
+    for (const [src, text] of Object.entries(rec.sources || {})) {
+      if (isPlaceholder(src, text)) { ignored = src; continue; }
+      const rest = String(text).replace(ODORLESS_TERMS, " ");
+      const words = rest.toLowerCase().split(/[^a-z-]+/).filter((w) => w.length > 2 && !DESC_STOP.has(w));
+      if (!words.length) { none.push(src); continue; }
+      odor.push(src);
+      for (const w of new Set(words)) seen.set(w, (seen.get(w) || 0) + 1);
+    }
+    // Descriptors named by more than one source, most-cited first.
+    const common = [...seen].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    return { odor, none, common, ignored, name: rec.name };
+  }
+
+  // ---- The integrated odor panel ----
+  // Every line of evidence the site has, strongest first. The headline takes the
+  // strongest one available; lower lines that disagree are called out, not hidden.
+  function odorEvidence(ctx) {
+    const { hit, atlas, rule, flags, desc } = ctx;
+    const rows = [];
+
+    if (atlas && (atlas.odor.length || atlas.none.length)) {
+      const n = atlas.odor.length + atlas.none.length;
+      const parts = [];
+      if (atlas.odor.length) {
+        parts.push(`${atlas.odor.length} of ${n} describe an odor (${atlas.odor.join(", ")})` +
+          (atlas.common.length
+            ? ` — most often <em>${atlas.common.map(([w]) => escapeHtml(w)).join(", ")}</em>`
+            : ""));
+      }
+      if (atlas.none.length) parts.push(`${atlas.none.length} report${atlas.none.length === 1 ? "s" : ""} it odorless (${atlas.none.join(", ")})`);
+      const lab = hit && hit.src === "Lab-Tested";
+      rows.push({ tier: "reported", used: !lab,
+        vote: atlas.odor.length && atlas.none.length ? "mixed" : atlas.odor.length ? "odor" : "odorless",
+        name: "Published odor atlases", detail: parts.join("; ") + "." +
+          (atlas.ignored ? `<span class="fine">AromaDB's “no aroma” entry is ignored; it is ` +
+            `attached to many clearly odorous molecules.</span>` : "") +
+          (lab ? `<span class="fine">Outranked by the lab test below.</span>` : ""),
+        nOdor: atlas.odor.length, nNone: atlas.none.length });
+    }
+    if (hit && hit.odor) {
+      const isOdor = hit.odor === "Odor", lab = hit.src === "Lab-Tested";
+      rows.push({ tier: "reported", used: true, vote: isOdor ? "odor" : "odorless",
+        name: lab ? "Lab-tested (Mayhew et al.)" : "Mayhew et al. curated dataset", lab,
+        detail: `Labelled <strong>${escapeHtml(hit.odor.toLowerCase())}</strong>` +
+          (hit.src ? ` (${escapeHtml(hit.src)})` : "") + "." +
+          (ctx.hitStereoBlind ? `<span class="fine">Matched ignoring stereochemistry.</span>` : ""),
+        nOdor: isOdor ? 1 : 0, nNone: isOdor ? 0 : 1 });
+    }
+    if (hit && hit.p != null) {
+      rows.push({ tier: "model", used: true, vote: hit.p >= 0.5 ? "odor" : "odorless",
+        name: "Transport-ML model",
+        detail: `p(odorous) = ${hit.p.toFixed(3)} — the paper's gradient-boosted model, which uses ` +
+          `measured transport features.`, prob: hit.p });
+    }
+
+    const t = transportInputs(ctx);
+    const tv = transportVerdict(t.vp, t.logp);
+    ctx.transport = { t, tv };
+    if (tv.verdict) {
+      const scaleNote = t.logpFit ? "" :
+        ` The boundaries were fit on Moriguchi logP; this uses ${t.logpSource.includes("Crippen") ? "Crippen" : "OPERA"} logP.`;
+      rows.push({ tier: "model", used: true, vote: tv.verdict,
+        name: "Transport boundaries (vapor pressure &amp; logP)",
+        detail: `VP ${fmtSci(t.vp)} mmHg <small class="src">${escapeHtml(t.vpSource)}</small>, ` +
+          `logP ${fmt(t.logp, 2)} <small class="src">${escapeHtml(t.logpSource)}</small> — ` +
+          `${tv.verdict === "odor" ? "inside" : "outside"} the odorous window ` +
+          `(${fmt(tv.low, 1)} &lt; logP &lt; ${fmt(tv.high, 1)} at this volatility)` +
+          (tv.lowMargin < 0 ? `, ${fmt(-tv.lowMargin, 1)} logP units below the low-volatility boundary.` : ".") +
+          `<span class="fine">${t.vpPredicted ? " The vapor pressure is a model prediction, which can be 10–50× off." : ""}${scaleNote}</span>` });
+    } else {
+      rows.push({ tier: "model", used: false, vote: null,
+        name: "Transport boundaries (vapor pressure &amp; logP)",
+        detail: "No vapor pressure is available for this molecule. Enter one under the plot below to run it." });
+    }
+
+    const na = flags.salt || flags.inorganic;
+    const mw = desc.mw == null ? "?" : fmt(desc.mw, 1), het = desc.nhet == null ? "?" : desc.nhet;
+    rows.push({ tier: "rule", used: !na,
+      vote: na ? null : rule.odorous ? "odor" : rule.tooHeavyOrPolar ? "odorless" : null,
+      name: "Rule of three",
+      detail: na
+        ? `Not applicable to ${flags.salt ? "salts / multi-component species" : "inorganic or metal-containing compounds"}.`
+        : `MW ${mw} Da (need 30–300: ${yn(rule.mwOK)}), heteroatoms ${het} (need &lt;4: ${yn(rule.hetOK)}).`,
+      why: "it screens on size and heteroatom count alone, which is useful when nothing else is known " +
+        "but coarse: many heavier or more polar molecules still smell" });
+
+    return rows;
+  }
+
+  function odorVerdict(ctx, rows) {
+    const reported = rows.filter((r) => r.tier === "reported" && r.used);
+    const s = (n) => (n === 1 ? "" : "s");
+    // A direct lab test outranks everything, including the involatility override
+    // (no lab-tested molecule below that line is labelled odorous, so they never clash).
+    const lab = reported.find((r) => r.lab);
+    if (lab) {
+      const atlas = rows.find((r) => r.name === "Published odor atlases");
+      const against = atlas ? (lab.vote === "odor" ? atlas.nNone : atlas.nOdor) : 0;
+      return { dir: lab.vote, cls: lab.vote === "odor" ? "v-odor" : "v-odorless",
+        icon: lab.vote === "odor" ? "👃" : "🚫", label: lab.vote === "odor" ? "Odorous" : "Odorless",
+        pill: "Lab-tested",
+        sub: `Tested directly in the Mayhew et al. study.` +
+          (against ? ` ${against} published atlas source${s(against)} say${against === 1 ? "s" : ""} otherwise; ` +
+            `the lab test takes precedence.` : "") };
+    }
+    const nOdor = reported.reduce((a, r) => a + r.nOdor, 0);
+    const nNone = reported.reduce((a, r) => a + r.nNone, 0);
+    // Physics outranks reports for molecules far too involatile to reach the nose. In the
+    // Mayhew dataset, molecules >3 logP units below the low-volatility boundary are labelled
+    // odorless 99 : 34 (the odorous ones mostly reactive inorganics smelled via breakdown
+    // products), and every atlas-"odorous" one the dataset also labels is odorless (16/16) --
+    // sugars, amino acids, acids, surfactants described by taste ("sweet") or by impurities.
+    // A predicted VP can be 10-50x off (~1.7 log units ≈ 3 logP units here), so it needs more.
+    const { t, tv } = ctx.transport;
+    if (tv.verdict === "odorless" && tv.lowMargin < -(t.vpPredicted ? INVOLATILE_PRED : INVOLATILE)) {
+      return { dir: "odorless", cls: "v-odorless", icon: "🚫", label: "Probably odorless", pill: "Too involatile",
+        sub: `Its vapor pressure (${fmtSci(t.vp)} mmHg) is far too low for it to reach the nose: it sits ` +
+          `${fmt(-tv.lowMargin, 1)} logP units below the transport model's low-volatility boundary.` +
+          (nOdor ? ` The ${nOdor === 1 ? "report of an odor more likely reflects" : `${nOdor} reports of an odor more likely reflect`} a taste ` +
+            `word such as “sweet”, an impurity, or a breakdown product.` : "") };
+    }
+    if (nOdor + nNone > 0) {
+      if (!nNone) return { dir: "odor", cls: "v-odor", icon: "👃", label: "Odorous", pill: "Reported",
+        sub: `Described as having an odor by ${nOdor} published source${s(nOdor)}.` };
+      if (!nOdor) return { dir: "odorless", cls: "v-odorless", icon: "🚫", label: "Odorless", pill: "Reported",
+        sub: `Reported odorless by ${nNone} published source${s(nNone)}.` };
+      return { dir: nOdor > nNone ? "odor" : nNone > nOdor ? "odorless" : null, cls: "v-maybe", icon: "❓",
+        label: nOdor > nNone ? "Probably odorous" : nNone > nOdor ? "Probably odorless" : "Reports conflict",
+        pill: "Reports disagree",
+        sub: `${nOdor} source${s(nOdor)} describe${nOdor === 1 ? "s" : ""} an odor and ${nNone} ` +
+          `report${nNone === 1 ? "s" : ""} it odorless — it may be a weak odorant, or an impurity may be what was smelled.` };
+    }
+    const ml = rows.find((r) => r.prob != null);
+    if (ml) {
+      const p = ml.prob;
+      return { dir: ml.vote, cls: p >= 0.5 ? "v-odor" : "v-odorless", icon: p >= 0.5 ? "👃" : "🚫",
+        label: p >= 0.5 ? "Probably odorous" : "Probably odorless", pill: "Transport-ML model",
+        sub: `${Math.round(Math.max(p, 1 - p) * 100)}% confidence.` };
+    }
+    if (ctx.flags.salt || ctx.flags.inorganic) {
+      return { dir: null, cls: "v-maybe", icon: "❓", label: "Uncertain", pill: "Outside the models",
+        sub: ctx.flags.salt
+          ? "Salt / multi-component species — the transport models don't apply cleanly, and no reports were found."
+          : "Inorganic / metal-containing — outside the models' chemical space, and no reports were found." };
+    }
+    const tb = rows.find((r) => r.name.startsWith("Transport boundaries") && r.used);
+    if (tb) {
+      return { dir: tb.vote, cls: tb.vote === "odor" ? "v-odor" : "v-odorless", icon: tb.vote === "odor" ? "👃" : "🚫",
+        label: tb.vote === "odor" ? "Probably odorous" : "Probably odorless", pill: "Transport model",
+        sub: `No published reports found; predicted from its vapor pressure and logP` +
+          (t.vpPredicted ? " (the vapor pressure itself is predicted)." : ".") };
+    }
+    const r3 = ctx.rule;
+    return { dir: r3.odorous ? "odor" : r3.tooHeavyOrPolar ? "odorless" : null,
+      cls: r3.odorous ? "v-odor" : r3.tooHeavyOrPolar ? "v-odorless" : "v-maybe",
+      icon: r3.odorous ? "👃" : r3.tooHeavyOrPolar ? "🚫" : "❓",
+      label: r3.odorous ? "Possibly odorous" : r3.tooHeavyOrPolar ? "Possibly odorless" : "Uncertain",
+      pill: "Rule of three only",
+      sub: "No reports or vapor pressure found, so this rests on a structure-only rule of thumb." };
+  }
+
+  const VOTE_TAG = {
+    odor: `<span class="tag odor">odor</span>`,
+    odorless: `<span class="tag odorless">odorless</span>`,
+    mixed: `<span class="tag maybe">mixed</span>`,
+  };
+  const TIER_LABEL = { reported: "What people report", model: "What the models predict", rule: "Rule of thumb" };
+
+  function renderOdor(ctx) {
+    if (ctx !== current || ctx.atlas === undefined) return;
+    const rows = odorEvidence(ctx);
+    const v = odorVerdict(ctx, rows);
+    const disagree = v.dir ? rows.filter((r) => r.used && (r.vote === "odor" || r.vote === "odorless") && r.vote !== v.dir) : [];
+
+    const el = $("verdict");
+    el.className = "verdict " + v.cls;
+    el.innerHTML =
+      `<span class="pill">${escapeHtml(v.pill)}</span>` +
+      `<p class="big">${v.icon} ${escapeHtml(v.label)}</p>` +
+      `<p class="sub">${escapeHtml(v.sub)}</p>` +
+      (disagree.length
+        ? `<p class="disagree"><strong>Disagrees:</strong> ` +
+          disagree.map((r) => `${r.name}${r.why ? ` — ${r.why}` : ""}`).join("; ") + `.</p>`
+        : "");
+
+    let html = "", tier = null;
+    for (const r of rows) {
+      if (r.tier !== tier) { tier = r.tier; html += `<div class="ev-tier">${TIER_LABEL[tier]}</div>`; }
+      html += `<div class="ev${r.used ? "" : " ev-off"}">` +
+        `<div class="ev-vote">${VOTE_TAG[r.vote] || `<span class="tag na">—</span>`}</div>` +
+        `<div><div class="name">${r.name}</div><div class="verdict-line">${r.detail}</div>` +
+        (r.prob != null ? `<div class="prob-bar"><div style="width:${Math.round(r.prob * 100)}%"></div></div>` : "") +
+        `</div></div>`;
+    }
+    html += `<p class="hint" style="margin:14px 0 0">The headline uses the strongest evidence available: ` +
+      `a lab test › what people report › the paper's transport-ML model › the transport boundaries › the rule of three. ` +
+      `The exception: a molecule far below the low-volatility boundary (${INVOLATILE} logP units, or ` +
+      `${INVOLATILE_PRED} if its vapor pressure is predicted) is called odorless whatever the atlases say.</p>`;
+    $("evidence").innerHTML = html;
+    renderTransport(ctx);
   }
 
   // ---- Odor quality: predicted (OpenPOM, lookup of precomputed predictions) ----
@@ -406,9 +688,9 @@
 
   function renderPomEntries(box, seq, p, source) {
       if (seq !== pSeq) return;
-      // "odorless" is a meta-label, not an odor character — report it separately.
+      // "odorless" is a meta-label, not an odor character, and OpenPOM is unreliable at
+      // odor/odorless — so it is left out of the list and not used by the odor panel.
       const odorlessIdx = POM.labels.indexOf("odorless");
-      const odorlessHit = p.find((e) => e[0] === odorlessIdx);
       const chars = p.filter((e) => e[0] !== odorlessIdx).slice(0, POM_SHOW);
 
       const rows = chars.map(([j, v]) => {
@@ -421,23 +703,13 @@
         `</div>`;
       }).join("");
 
-      // When "odorless" outranks every character label, say so up front — otherwise a
-      // ranked list of odor characters overstates a molecule the model thinks has none.
-      const odorlessTop = p[0][0] === odorlessIdx;
       const weak = !chars.length || chars[0][1] / 1000 < POM_WEAK;
       const lead = weak
         ? `<p class="hint" style="margin:0 0 10px">No descriptor scores highly for this ` +
           `molecule — the model gives it no confident odor character.</p>`
         : `<p class="verdict-line" style="margin:0 0 10px">` +
-          (odorlessTop ? "Predicted odor character, if any:" : "Predicted odor character:") +
+          "Predicted odor character:" +
           `</p>`;
-      const odorless = odorlessHit
-        ? `<p class="hint" style="margin:${odorlessTop ? "0 0 12px" : "12px 0 0"}">OpenPOM ` +
-          `<em>odorless</em> score: <strong>${(odorlessHit[1] / 1000).toFixed(2)}</strong> ` +
-          `(${fmtTopPercent(pomTopPercent(odorlessIdx, odorlessHit[1]))} of the library)` +
-          (odorlessTop ? " — the model's highest-scoring label for this molecule." : ".") +
-          `</p>`
-        : "";
       const list = `<div class="pom-list">${rows}</div>`;
       const n = POM.meta.n.toLocaleString();
       const provenance = source === "predicted"
@@ -447,8 +719,7 @@
           `OpenPOM was run over.</p>`
         : `<p class="hint" style="margin:12px 0 0">Model scores are uncalibrated, so each is ` +
           `also given as its rank among the ${n} molecules OpenPOM was run over.</p>`;
-      box.innerHTML = (odorlessTop ? odorless + lead + list : lead + list + odorless) +
-        provenance;
+      box.innerHTML = lead + list + provenance;
   }
 
   // ---- Odor quality (lookup only, lazy-loaded) ----
@@ -460,6 +731,7 @@
         for (const rec of d) {
           if (rec.ikey) byKeyQ.set(rec.ikey, rec);
           if (rec.can) byCanQ.set(rec.can, rec);
+          if (rec.name && !byNameQ.has(rec.name.toLowerCase())) byNameQ.set(rec.name.toLowerCase(), rec);
         }
       }).catch(() => {});
     }
@@ -512,7 +784,25 @@
   }
 
   const PPM = 1e6;                 // v/v -> ppm
-  const INT_REF = 50;              // "moderate" reference intensity for the readout
+  // The panel rated on the generalized Labeled Magnitude Scale (gLMS, 0-100). Its verbal
+  // anchors sit at quasi-logarithmic positions (Green et al. 1996; Bartoshuk et al. 2004).
+  const GLMS = [
+    [1.4, "barely detectable"], [6, "weak"], [17, "moderate"],
+    [35, "strong"], [53, "very strong"], [100, "strongest imaginable"],
+  ];
+  const INT_REF = 17;              // "moderate" on the gLMS: reference point for the readout
+
+  // Nearest gLMS label for a rating: the anchor itself when close, else the two it sits between.
+  function glmsWord(y) {
+    if (y < GLMS[0][0] * 0.7) return "below barely detectable";
+    for (let i = 0; i < GLMS.length - 1; i++) {
+      const [lo, a] = GLMS[i], [hi, b] = GLMS[i + 1];
+      if (y > hi) continue;
+      const f = (y - lo) / (hi - lo);
+      return f < 0.2 ? a : f > 0.8 ? b : `between ${a} and ${b}`;
+    }
+    return GLMS[GLMS.length - 1][1];
+  }
 
   function intensityAt(rec, logc) {
     const g = INT.meta.grid;
@@ -568,15 +858,15 @@
       const lines = [];
       if (iSat != null) {
         lines.push(`Saturated headspace (neat, 25&nbsp;°C, ${fmtPpm(sat)}): predicted intensity ` +
-          `<strong>${iSat.toFixed(0)}</strong>.`);
+          `<strong>${iSat.toFixed(0)}</strong> (${glmsWord(iSat)}).`);
       } else if (sat < g.lo) {
         lines.push(`Its saturated vapor concentration (${fmtPpm(sat)}) is below the plotted range — ` +
           `it barely evaporates at room temperature.`);
       }
       if (cRef != null && cRef <= sat) {
-        lines.push(`Reaches a moderate intensity (${INT_REF}) at ≈ <strong>${fmtPpm(cRef)}</strong>.`);
+        lines.push(`Reaches <em>moderate</em> (${INT_REF} on the gLMS) at ≈ <strong>${fmtPpm(cRef)}</strong>.`);
       } else {
-        lines.push(`Doesn't reach a moderate intensity (${INT_REF}) below saturation.`);
+        lines.push(`Doesn't reach <em>moderate</em> (${INT_REF} on the gLMS) below saturation.`);
       }
       const outside = (cRef != null && (cRef < tr.lo || cRef > tr.hi));
       box.innerHTML =
@@ -603,7 +893,8 @@
         const ppm = parseFloat(inp.value);
         if (!(ppm > 0)) { out.innerHTML = ""; return; }
         const lc = Math.log10(ppm / PPM);
-        let msg = `→ predicted intensity <strong>${intensityAt(rec, lc).toFixed(0)}</strong>`;
+        const yi = intensityAt(rec, lc);
+        let msg = `→ predicted intensity <strong>${yi.toFixed(0)}</strong> (${glmsWord(yi)})`;
         if (lc > sat) msg += ` <span style="color:var(--maybe)">(above saturation — not reachable at 25&nbsp;°C)</span>`;
         else if (lc < tr.lo || lc > tr.hi) msg += ` <span style="color:var(--muted)">(extrapolated)</span>`;
         out.innerHTML = msg;
@@ -614,7 +905,7 @@
   function intensityPlotSVG(rec, sat) {
     const g = INT.meta.grid, tr = INT.meta.train;
     const xmin = g.lo, xmax = g.lo + (g.n - 1) * g.step;
-    const W = 480, H = 300, mL = 42, mR = 16, mT = 14, mB = 42;
+    const W = 580, H = 320, mL = 42, mR = 118, mT = 14, mB = 42;
     const pw = W - mL - mR, ph = H - mT - mB;
     const X = (x) => mL + (x - xmin) / (xmax - xmin) * pw;
     const Y = (y) => mT + (100 - Math.min(Math.max(y, 0), 100)) / 100 * ph;
@@ -639,9 +930,14 @@
       axis += `<text x="${px}" y="${mT + ph + 15}" fill="#9fb0c0" font-size="10" text-anchor="middle">${lab}</text>`;
     }
     for (let t = 0; t <= 100; t += 25) {
-      const py = Y(t);
-      grid += `<line x1="${mL}" y1="${py}" x2="${mL + pw}" y2="${py}" stroke="#22303e"/>`;
-      axis += `<text x="${mL - 6}" y="${py + 3}" fill="#9fb0c0" font-size="10" text-anchor="end">${t}</text>`;
+      axis += `<text x="${mL - 6}" y="${Y(t) + 3}" fill="#9fb0c0" font-size="10" text-anchor="end">${t}</text>`;
+    }
+    // gLMS verbal anchors: a gridline at each, labelled on the right.
+    for (const [v, name] of GLMS) {
+      const py = Y(v);
+      grid += `<line x1="${mL}" y1="${py}" x2="${mL + pw}" y2="${py}" stroke="#2b3a49"/>`;
+      axis += `<line x1="${mL + pw}" y1="${py}" x2="${mL + pw + 5}" y2="${py}" stroke="#7f93a8"/>` +
+        `<text x="${mL + pw + 8}" y="${py + 3.5}" fill="#9fb0c0" font-size="10">${name}</text>`;
     }
     const satX = Math.min(Math.max(sat, xmin), xmax);
     const satShade = sat < xmax
@@ -662,7 +958,7 @@
       `<polyline points="${pts(tr.lo, tr.hi)}" stroke="var(--accent)" stroke-width="2.5" fill="none"/>` +
       `</g>` + axis +
       `<text x="${mL + pw / 2}" y="${H - 5}" fill="#9fb0c0" font-size="11" text-anchor="middle">concentration in air (ppm, log scale)</text>` +
-      `<text transform="translate(12,${mT + ph / 2}) rotate(-90)" fill="#9fb0c0" font-size="11" text-anchor="middle">perceived intensity</text>` +
+      `<text transform="translate(12,${mT + ph / 2}) rotate(-90)" fill="#9fb0c0" font-size="11" text-anchor="middle">perceived intensity (gLMS)</text>` +
       `</svg>`;
   }
 
@@ -731,10 +1027,10 @@
       `<div class="verdict-line" style="color:var(--muted)">A comparative reference point only — it counts how many sniffs of ` +
       `undiluted headspace would together equal the daily Threshold of Toxicological Concern. Not a safety determination, ` +
       `exposure limit, or recommendation.</div>` +
-      `<div class="verdict-line" style="color:var(--muted)">The TTC is a deliberately <strong>conservative</strong> generic ` +
-      `screening threshold used when no substance-specific data exist. Where a molecule has its own toxicological safety ` +
-      `data, the actual tolerable exposure is often far higher — so this figure can substantially <em>understate</em> how ` +
-      `much can be tolerated (vanillin, for example, has established safe-use levels well above what this count implies).</div>` +
+      `<div class="verdict-line" style="color:var(--muted)">The TTC is a generic screening threshold for chemicals ` +
+      `without their own toxicity data, and is generally <strong>conservative</strong>. Where a molecule has ` +
+      `substance-specific toxicological data, those data take precedence over this figure — they usually allow more ` +
+      `exposure than the TTC, but not always.</div>` +
       `</div>`;
   }
 
@@ -753,111 +1049,23 @@
     if (vp == null || !(vp > 0) || logp == null) return { verdict: null };
     const b = transportBoundaries(vp);
     const odorous = logp > b.low && logp < b.high;
-    return { verdict: odorous ? "odor" : "odorless", low: b.low, high: b.high, logp, vp };
+    // lowMargin < 0: below the low-volatility boundary (too involatile / hydrophilic).
+    return { verdict: odorous ? "odor" : "odorless", low: b.low, high: b.high, logp, vp,
+             lowMargin: logp - b.low };
   }
 
-  // ---- Rendering ----
-  function renderVerdict(primary, hit) {
-    const el = $("verdict");
-    const cls = primary.maybe ? "v-maybe" : (primary.odorous ? "v-odor" : "v-odorless");
-    el.parentElement.className = "card verdict-card";
-    el.className = "verdict " + cls;
-    const icon = primary.maybe ? "❓" : (primary.odorous ? "👃" : "🚫");
-    // Ground-truth label follows the site's odor colour code: Odor = red, Odorless = blue.
-    const gtColor = hit && hit.odor === "Odor" ? "var(--odor)" : "var(--odorless)";
-    el.innerHTML =
-      `<span class="pill">${escapeHtml(primary.source)}</span>` +
-      `<p class="big">${icon} ${escapeHtml(primary.label)}</p>` +
-      `<p class="sub">${escapeHtml(primary.conf)}` +
-      (hit ? ` · <span style="color:${gtColor}">in study dataset (ground truth: ${escapeHtml(hit.odor)})</span>` : "") +
-      `</p>`;
-    $("result").classList.remove("hidden");
-  }
-
-  function renderBasis(rule, datasetProb, hit, flags) {
-    const rows = [];
-
-    // Rule of three
-    {
-      const na = flags && (flags.salt || flags.inorganic);
-      const tag = na
-        ? `<span class="tag na">Not applicable</span>`
-        : rule.odorous
-        ? `<span class="tag odor">Odorous</span>`
-        : (rule.tooHeavyOrPolar ? `<span class="tag odorless">Odorless-leaning</span>` : `<span class="tag na">Inconclusive</span>`);
-      const mw = rule.desc.mw == null ? "?" : fmt(rule.desc.mw, 1);
-      const het = rule.desc.nhet == null ? "?" : rule.desc.nhet;
-      const note = na
-        ? `<div class="verdict-line" style="color:var(--muted)">The rule of three is validated only for organic molecules; ` +
-          `it does not apply to ${flags.salt ? "salts / multi-component species" : "inorganic or metal-containing compounds"}.</div>`
-        : "";
-      rows.push(
-        `<div class="model"><div class="name">Rule of three ${tag}</div>` +
-        `<div class="verdict-line">MW ${mw} Da (need 30–300: ${yn(rule.mwOK)}), ` +
-        `heteroatoms ${het} (need &lt;4: ${yn(rule.hetOK)}).</div>${note}</div>`
-      );
-    }
-
-    // Transport-ML probability (dataset only)
-    {
-      let body;
-      if (datasetProb != null) {
-        const pct = Math.round(datasetProb * 100);
-        const tag = datasetProb >= 0.5 ? `<span class="tag odor">Odorous</span>` : `<span class="tag odorless">Odorless</span>`;
-        body =
-          `<div class="name">Transport-ML probability ${tag} <span class="tag dataset">dataset</span></div>` +
-          `<div class="prob-bar"><div style="width:${pct}%"></div></div>` +
-          `<div class="verdict-line">p(odorous) = ${datasetProb.toFixed(3)} — the gradient-boosted model value reported in the paper.</div>`;
-      } else {
-        body =
-          `<div class="name">Transport-ML probability <span class="tag na">not available</span></div>` +
-          `<div class="verdict-line">Only provided for the 1,924 molecules in the study's curated dataset ` +
-          `(it needs experimental transport features that can't be computed from structure alone).</div>`;
-      }
-      rows.push(`<div class="model">${body}</div>`);
-    }
-
-    $("basis").innerHTML = rows.join("");
-  }
-
-  function renderTransport(state, useManual) {
+  // ---- Transport plot (inside the odor panel) ----
+  function renderTransport(ctx) {
     const box = $("transport-box");
-    const desc = state.desc, hit = state.hit;
-
-    let vp = null, logp = null, vpSource = "", logpSource = "";
-    if (useManual) {
-      const mv = parseFloat($("man-vp").value);
-      const ml = parseFloat($("man-logp").value);
-      if (!isNaN(mv)) { vp = mv; vpSource = "your value"; }
-      if (!isNaN(ml)) { logp = ml; logpSource = "your value"; }
-    }
-    if (vp == null && hit && hit.vp != null) { vp = hit.vp; vpSource = "dataset"; }
-    if (logp == null && hit && hit.logp != null) { logp = hit.logp; logpSource = "dataset (Moriguchi)"; }
-    if (logp == null && desc.logp != null) { logp = desc.logp; logpSource = "computed (Crippen)"; }
-
-    const res = transportVerdict(vp, logp);
-    if (res.verdict == null) {
-      box.innerHTML =
-        `<p class="hint" style="margin:0">No vapor pressure available for this molecule, so the boundary ` +
-        `model can't be evaluated. Enter a measured vapor pressure below to run it.</p>`;
-      // prefill logp for convenience
-      if (logp != null && !$("man-logp").value) $("man-logp").value = fmt(logp, 3);
+    const { t, tv } = ctx.transport;
+    if (t.logp != null && !$("man-logp").value) $("man-logp").placeholder = fmt(t.logp, 2);
+    if (t.vp != null && !$("man-vp").value) $("man-vp").placeholder = fmtSci(t.vp);
+    if (!tv.verdict) {
+      box.innerHTML = `<p class="hint" style="margin:0">No vapor pressure available for this molecule, ` +
+        `so there is nothing to plot. Enter a measured value below.</p>`;
       return;
     }
-
-    const tag = res.verdict === "odor" ? `<span class="tag odor">Odorous</span>` : `<span class="tag odorless">Odorless</span>`;
-    box.innerHTML =
-      `<div class="model" style="border:none;padding-top:0">` +
-      `<div class="name">Boundary verdict ${tag}</div>` +
-      `<div class="verdict-line">` +
-      `Vapor pressure = ${fmt(vp, 4)} mmHg <small style="color:var(--muted)">(${vpSource})</small>, ` +
-      `logP = ${fmt(logp, 2)} <small style="color:var(--muted)">(${logpSource})</small>.<br>` +
-      `Odorous window for this volatility: ${fmt(res.low, 2)} &lt; logP &lt; ${fmt(res.high, 2)}. ` +
-      `This molecule ${res.verdict === "odor" ? "falls inside" : "falls outside"} it.` +
-      `</div>` +
-      transportPlotSVG(vp, logp, res) +
-      `</div>`;
-    if (logp != null && !$("man-logp").value) $("man-logp").value = fmt(logp, 3);
+    box.innerHTML = transportPlotSVG(t.vp, t.logp, tv);
   }
 
   // Scatter of the two logistic boundaries in log10(VP)/logP space, with the
@@ -920,7 +1128,7 @@
     return ticks;
   }
   function num(x) { const n = typeof x === "number" ? x : parseFloat(x); return isFinite(n) ? n : null; }
-  function fmt(x, d) { return x == null || !isFinite(x) ? "—" : Number(x).toFixed(d); }
+  function fmt(x, d) { return x == null || !isFinite(x) ? "—" : Number(x).toFixed(d).replace(/^-(0\.?0*)$/, "$1"); }
   function yn(b) { return b ? "✔" : "✗"; }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

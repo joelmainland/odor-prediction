@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Fetch vapor pressure and boiling point from the EPA CompTox (CTX) API.
+"""Fetch vapor pressure, boiling point and logP from the EPA CompTox (CTX) API.
 
 The intensity model was trained on EPI Suite's `best_vp` / `best_bp` (experimental
 where available, MPBPVP estimate otherwise). CTX's OPERA_VP / OPERA_BP records follow
 the same convention -- propValue is the curated experimental value when OPERA has one
 and its QSAR prediction otherwise -- so we take those, and report which it was.
+OPERA_LogP (octanol-water) follows the same rule; it feeds the transport model.
 
 Input: a CSV with `smiles` (and any id columns, passed through). Output: one row per
-input with inchikey, dtxsid, vp_mmHg, bp_C and *_source in {experimental, predicted}.
+input with inchikey, dtxsid, vp_mmHg, bp_C, logp and *_source in {experimental, predicted}.
 
 API key: $CTX_API_KEY, else ~/.config/comptox/api_key. It is only ever sent to
 comptox.epa.gov in the x-api-key header. Responses are cached (keyed by InChIKey /
@@ -21,7 +22,8 @@ RDLogger.DisableLog("rdApp.*")
 
 BASE = "https://comptox.epa.gov/ctx-api"   # api-ccte.epa.gov no longer resolves
 BATCH = 200
-MODELS = {"OPERA_VP": "vp", "OPERA_BP": "bp"}
+MODELS = {"OPERA_VP": "vp", "OPERA_BP": "bp", "OPERA_LogP": "logp"}
+WANT = sorted(MODELS.values())   # stored per DTXSID so adding a model refetches old entries
 
 ap = argparse.ArgumentParser()
 ap.add_argument("input")
@@ -93,13 +95,13 @@ def resolve(k):
     return (d, "exact") if d else ((cache["dtxsid"].get(flat[k]), "stereo-blind")
                                    if k in flat and cache["dtxsid"].get(flat[k]) else (None, None))
 
-# --- DTXSID -> OPERA VP / BP -------------------------------------------------------
+# --- DTXSID -> OPERA VP / BP / logP -------------------------------------------------------
 ids = sorted({resolve(k)[0] for k in keys} - {None})
-todo = [d for d in ids if d not in cache["props"]]
+todo = [d for d in ids if cache["props"].get(d, {}).get("_m") != WANT]
 print(f"{len(ids)} DTXSIDs, {len(todo)} to fetch properties for")
 for i in range(0, len(todo), BATCH):
     chunk = todo[i:i + BATCH]
-    got = {d: {} for d in chunk}
+    got = {d: {"_m": WANT} for d in chunk}
     for rec in post("/chemical/property/predicted/search/by-dtxsid/", chunk, "application/json"):
         short = MODELS.get(rec.get("modelName"))
         if short and rec["dtxsid"] in got:
@@ -114,7 +116,7 @@ for k in df.inchikey:
     d, how = resolve(k) if k else (None, None)
     row = {"inchikey": k, "dtxsid": d, "match": how}
     p = cache["props"].get(d, {}) if d else {}
-    for short in ("vp", "bp"):
+    for short in ("vp", "bp", "logp"):
         val, exp = p.get(short, [None, None])
         row[f"{short}"] = val
         row[f"{short}_source"] = None if val is None else (

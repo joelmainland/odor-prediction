@@ -67,8 +67,7 @@ button:disabled{opacity:.5;cursor:default}
 
 .hidden{display:none}
 
-.verdict-card{display:flex;gap:24px;align-items:center;flex-wrap:wrap}
-.verdict{flex:1;min-width:240px}
+.verdict{margin:0 0 6px}
 .verdict .big{font-size:2rem;font-weight:800;letter-spacing:-.01em;margin:0 0 6px}
 .verdict .sub{color:var(--muted);margin:0}
 .verdict .pill{display:inline-block;padding:3px 12px;border-radius:999px;font-size:.8rem;font-weight:700;margin-bottom:10px;text-transform:uppercase;letter-spacing:.04em}
@@ -88,14 +87,28 @@ button:disabled{opacity:.5;cursor:default}
 .props td:first-child{color:var(--muted)}
 .props td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace}
 
-#basis .model{padding:12px 0;border-bottom:1px solid var(--line)}
-#basis .model:last-child{border-bottom:none}
-#basis .model .name{font-weight:600}
-#basis .model .verdict-line{margin-top:2px}
+/* Molecule card: structure beside its properties. */
+.mol-card{display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:center}
+@media(max-width:620px){.mol-card{grid-template-columns:1fr}.mol-card .structure{justify-self:center}}
+.props small.src{display:block;color:var(--muted);font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:.78rem}
+.ev small.src{color:var(--muted);font-size:.84rem}
+.ev small.src::before{content:"("} .ev small.src::after{content:")"}
+
+/* Odor panel: verdict, then one row per line of evidence. */
+.disagree{margin:10px 0 0;font-size:.92rem;border-left:3px solid var(--maybe);padding:2px 0 2px 10px}
+.ev-tier{margin:18px 0 2px;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.ev{display:grid;grid-template-columns:7.5em 1fr;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.ev .tag{margin-left:0}
+.ev .name{font-weight:600}
+.ev .verdict-line{margin-top:2px;font-size:.94rem}
+.ev-off{opacity:.62}
+.fine{display:block;color:var(--muted);font-size:.84rem;margin-top:3px}
+#transport-details{margin-top:14px}
 .tag{display:inline-block;padding:2px 9px;border-radius:6px;font-size:.78rem;font-weight:700;margin-left:6px}
 .tag.odor{background:rgba(232,83,79,.18);color:#ff8f8c}
 .tag.odorless{background:rgba(63,139,216,.18);color:#8fc0f0}
 .tag.na{background:#2b3a49;color:var(--muted)}
+.tag.maybe{background:rgba(224,166,64,.18);color:#f0c874}
 .tag.dataset{background:rgba(90,200,250,.16);color:var(--accent)}
 
 .qtable{width:100%;border-collapse:collapse;font-size:.95rem}
