@@ -41,6 +41,11 @@
   let byCanPOM = new Map();  // canonical SMILES -> same
   let pomPromise = null;     // lazy-load promise for openpom.json (2.2 MB)
   let pSeq = 0;              // guards async OpenPOM renders against races
+  let INT = null;            // intensity table { meta, mols }
+  let byKeyInt = new Map();  // InChIKey -> intensity record
+  let byCanInt = new Map();  // canonical SMILES -> same
+  let intPromise = null;     // lazy-load promise for intensity.json
+  let iSeq = 0;              // guards async intensity renders against races
   let current = null;        // { mol data for manual recompute }
 
   const $ = (id) => document.getElementById(id);
@@ -266,6 +271,7 @@
     renderBasis(rule, datasetProb, hit, flags);
     renderTransport(current, false);
     renderToxicity(ikey, canon);
+    renderIntensity(ikey, canon);
     // The mol is deleted as soon as analyze() returns, so capture the graph now —
     // the OpenPOM worker may need it after an async weight download.
     let molJson = null;
@@ -487,6 +493,177 @@
         `<strong>${rec.n}</strong> published database${rec.n === 1 ? "" : "s"}:</p>` +
         `<table class="qtable">${rows}</table>`;
     });
+  }
+
+  // ---- Intensity (MixInt network, precomputed curves) ----
+  // Each record holds the network's output on a fixed log10-concentration grid (x10).
+  // The network is piecewise-linear in log C, so linear interpolation is near-exact.
+  function ensureIntensity() {
+    if (!intPromise) {
+      intPromise = fetch("data/intensity.json").then((r) => r.json()).then((d) => {
+        INT = d;
+        for (const rec of d.mols) {
+          byKeyInt.set(rec.i, rec);
+          byCanInt.set(rec.c, rec);
+        }
+      }).catch(() => {});
+    }
+    return intPromise;
+  }
+
+  const PPM = 1e6;                 // v/v -> ppm
+  const INT_REF = 50;              // "moderate" reference intensity for the readout
+
+  function intensityAt(rec, logc) {
+    const g = INT.meta.grid;
+    const t = (logc - g.lo) / g.step;
+    if (t <= 0) return rec.y[0] / 10;
+    if (t >= g.n - 1) return rec.y[g.n - 1] / 10;
+    const k = Math.floor(t), f = t - k;
+    return (rec.y[k] * (1 - f) + rec.y[k + 1] * f) / 10;
+  }
+
+  // First log10 C at which the curve reaches `level`, or null.
+  function concForIntensity(rec, level) {
+    const g = INT.meta.grid, L = level * 10;
+    if (rec.y[0] >= L) return g.lo;
+    for (let k = 1; k < g.n; k++) {
+      if (rec.y[k] >= L) {
+        const f = (L - rec.y[k - 1]) / (rec.y[k] - rec.y[k - 1]);
+        return g.lo + (k - 1 + f) * g.step;
+      }
+    }
+    return null;
+  }
+
+  function fmtPpm(logc) { return fmtSci(Math.pow(10, logc) * PPM) + " ppm"; }
+
+  function renderIntensity(ikey, canon) {
+    const box = $("intensity-box");
+    if (!box) return;
+    const seq = ++iSeq;
+    box.innerHTML = `<p class="hint" style="margin:0">Loading intensity predictions…</p>`;
+    ensureIntensity().then(() => {
+      if (seq !== iSeq) return; // a newer molecule was analyzed; skip stale write
+      if (!INT) {
+        box.innerHTML = `<p class="hint" style="margin:0">Intensity predictions are unavailable right now.</p>`;
+        return;
+      }
+      const rec = (ikey && byKeyInt.get(ikey)) || byCanInt.get(canon) || null;
+      if (!rec) {
+        box.innerHTML =
+          `<p class="hint" style="margin:0">This molecule isn't among the ${INT.meta.n.toLocaleString()} ` +
+          `with the Dragon descriptors and vapor pressure the intensity network needs, so no curve is ` +
+          `shown.</p>`;
+        return;
+      }
+      const tr = INT.meta.train;
+      const sat = Math.log10(rec.vp / 760);          // saturated vapor, v/v at 25 °C
+      const g = INT.meta.grid, gHi = g.lo + (g.n - 1) * g.step;
+      const satIn = sat >= g.lo && sat <= gHi;
+      const iSat = satIn ? intensityAt(rec, sat) : null;
+      const cRef = concForIntensity(rec, INT_REF);
+      const vpSrc = INT.meta.vs[rec.vs] || "";
+
+      const lines = [];
+      if (iSat != null) {
+        lines.push(`Saturated headspace (neat, 25&nbsp;°C, ${fmtPpm(sat)}): predicted intensity ` +
+          `<strong>${iSat.toFixed(0)}</strong>.`);
+      } else if (sat < g.lo) {
+        lines.push(`Its saturated vapor concentration (${fmtPpm(sat)}) is below the plotted range — ` +
+          `it barely evaporates at room temperature.`);
+      }
+      if (cRef != null && cRef <= sat) {
+        lines.push(`Reaches a moderate intensity (${INT_REF}) at ≈ <strong>${fmtPpm(cRef)}</strong>.`);
+      } else {
+        lines.push(`Doesn't reach a moderate intensity (${INT_REF}) below saturation.`);
+      }
+      const outside = (cRef != null && (cRef < tr.lo || cRef > tr.hi));
+      box.innerHTML =
+        `<div class="model" style="border:none;padding-top:0">` +
+        `<div class="name">Predicted concentration–intensity curve ` +
+        (rec.t ? `<span class="tag dataset">training odorant</span>` : "") + `</div>` +
+        `<div class="verdict-line">${lines.join("<br>")}</div>` +
+        intensityPlotSVG(rec, sat) +
+        `<div class="int-probe"><label>Concentration (ppm, v/v in air) ` +
+        `<input id="int-ppm" type="number" step="any" min="0" placeholder="e.g. 1" /></label>` +
+        `<span id="int-out" class="verdict-line"></span></div>` +
+        `<div class="verdict-line" style="color:var(--muted)">Vapor pressure ${fmtSci(rec.vp)} mmHg ` +
+        `— ${escapeHtml(vpSrc)}. Solid line: the concentration range the panel rated ` +
+        `(${fmtPpm(tr.lo)} – ${fmtPpm(tr.hi)}); dashed: extrapolation` +
+        (outside ? `, which includes this molecule's moderate-intensity point` : "") +
+        `. Beyond saturation (grey) the concentration can't be reached at 25&nbsp;°C.</div>` +
+        `<div class="verdict-line" style="color:var(--muted)">Model predictions from a ` +
+        `<strong>preprint</strong> (not yet peer reviewed), trained on ${tr.n} odorants — ` +
+        `treat values for molecules unlike those as rough estimates.</div>` +
+        `</div>`;
+
+      const inp = $("int-ppm"), out = $("int-out");
+      inp.addEventListener("input", () => {
+        const ppm = parseFloat(inp.value);
+        if (!(ppm > 0)) { out.innerHTML = ""; return; }
+        const lc = Math.log10(ppm / PPM);
+        let msg = `→ predicted intensity <strong>${intensityAt(rec, lc).toFixed(0)}</strong>`;
+        if (lc > sat) msg += ` <span style="color:var(--maybe)">(above saturation — not reachable at 25&nbsp;°C)</span>`;
+        else if (lc < tr.lo || lc > tr.hi) msg += ` <span style="color:var(--muted)">(extrapolated)</span>`;
+        out.innerHTML = msg;
+      });
+    });
+  }
+
+  function intensityPlotSVG(rec, sat) {
+    const g = INT.meta.grid, tr = INT.meta.train;
+    const xmin = g.lo, xmax = g.lo + (g.n - 1) * g.step;
+    const W = 480, H = 300, mL = 42, mR = 16, mT = 14, mB = 42;
+    const pw = W - mL - mR, ph = H - mT - mB;
+    const X = (x) => mL + (x - xmin) / (xmax - xmin) * pw;
+    const Y = (y) => mT + (100 - Math.min(Math.max(y, 0), 100)) / 100 * ph;
+    const pts = (lo, hi) => {
+      const p = [];
+      for (let k = 0; k < g.n; k++) {
+        const x = g.lo + k * g.step;
+        if (x >= lo - 1e-9 && x <= hi + 1e-9) p.push(`${X(x).toFixed(1)},${Y(rec.y[k] / 10).toFixed(1)}`);
+      }
+      // close the segment exactly at its end points
+      if (lo > xmin) p.unshift(`${X(lo).toFixed(1)},${Y(intensityAt(rec, lo)).toFixed(1)}`);
+      if (hi < xmax) p.push(`${X(hi).toFixed(1)},${Y(intensityAt(rec, hi)).toFixed(1)}`);
+      return p.join(" ");
+    };
+    let grid = "", axis = "";
+    for (let t = Math.ceil(xmin); t <= xmax; t += 2) {
+      const px = X(t);
+      grid += `<line x1="${px}" y1="${mT}" x2="${px}" y2="${mT + ph}" stroke="#22303e"/>`;
+      // label as ppm: 10^(t+6)
+      const e = t + 6;
+      const lab = e === 0 ? "1" : e === 1 ? "10" : `10<tspan dy="-4" font-size="8">${e}</tspan>`;
+      axis += `<text x="${px}" y="${mT + ph + 15}" fill="#9fb0c0" font-size="10" text-anchor="middle">${lab}</text>`;
+    }
+    for (let t = 0; t <= 100; t += 25) {
+      const py = Y(t);
+      grid += `<line x1="${mL}" y1="${py}" x2="${mL + pw}" y2="${py}" stroke="#22303e"/>`;
+      axis += `<text x="${mL - 6}" y="${py + 3}" fill="#9fb0c0" font-size="10" text-anchor="end">${t}</text>`;
+    }
+    const satX = Math.min(Math.max(sat, xmin), xmax);
+    const satShade = sat < xmax
+      ? `<rect x="${X(satX)}" y="${mT}" width="${X(xmax) - X(satX)}" height="${ph}" fill="rgba(159,176,192,.10)"/>` +
+        (sat >= xmin ? `<line x1="${X(sat)}" y1="${mT}" x2="${X(sat)}" y2="${mT + ph}" stroke="#9fb0c0" stroke-width="1" stroke-dasharray="3 3"/>` +
+          `<text x="${X(sat) - 4}" y="${mT + 12}" fill="#9fb0c0" font-size="10" text-anchor="end">saturation</text>` : "")
+      : "";
+    const cid = "ipc" + Math.random().toString(36).slice(2, 7);
+    const dash = `stroke="var(--accent)" stroke-width="2" fill="none" stroke-dasharray="4 4" opacity=".7"`;
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin-top:12px" ` +
+      `font-family="-apple-system,Segoe UI,Roboto,sans-serif" role="img" ` +
+      `aria-label="Predicted perceived intensity versus concentration">` +
+      `<defs><clipPath id="${cid}"><rect x="${mL}" y="${mT}" width="${pw}" height="${ph}"/></clipPath></defs>` +
+      `<rect x="${mL}" y="${mT}" width="${pw}" height="${ph}" fill="#0c141c" stroke="#2b3a49"/>` +
+      `<g clip-path="url(#${cid})">${grid}${satShade}` +
+      `<polyline points="${pts(xmin, tr.lo)}" ${dash}/>` +
+      `<polyline points="${pts(tr.hi, xmax)}" ${dash}/>` +
+      `<polyline points="${pts(tr.lo, tr.hi)}" stroke="var(--accent)" stroke-width="2.5" fill="none"/>` +
+      `</g>` + axis +
+      `<text x="${mL + pw / 2}" y="${H - 5}" fill="#9fb0c0" font-size="11" text-anchor="middle">concentration in air (ppm, log scale)</text>` +
+      `<text transform="translate(12,${mT + ph / 2}) rotate(-90)" fill="#9fb0c0" font-size="11" text-anchor="middle">perceived intensity</text>` +
+      `</svg>`;
   }
 
   // ---- Toxicity reference (lookup only) ----

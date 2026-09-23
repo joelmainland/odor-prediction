@@ -87,6 +87,16 @@
     </div>
 
     <div class="card">
+      <h3>Intensity <small>(how strong it smells at a given concentration)</small></h3>
+      <p class="hint">Predicted perceived intensity (0–100 rating scale) across vapor-phase
+        concentrations, from the MixInt single-molecule intensity network
+        (Pellegrino&nbsp;et&nbsp;al., <strong>preprint</strong>). The network needs Dragon 3-D
+        descriptors that can't be computed in the browser, so its curves are precomputed for the
+        molecules those descriptors exist for.</p>
+      <div id="intensity-box"></div>
+    </div>
+
+    <div class="card">
       <h3>Odor quality <small>(what it smells like)</small></h3>
 
       <h4 class="sub">Predicted <small>— OpenPOM model</small></h4>
@@ -144,6 +154,21 @@
       This figure is a deliberately conservative, comparative reference — <strong>not</strong> a safety
       determination, exposure limit, or recommendation.
     </p>
+    <h3>Intensity</h3>
+    <p>
+      Perceived intensity is predicted by the single-molecule network from the MixInt study
+      (<a href="https://doi.org/10.1101/2025.08.08.668954" target="_blank" rel="noopener">Pellegrino&nbsp;et&nbsp;al.,
+      bioRxiv 2025</a> — a <strong>preprint</strong>). A trained panel rated 62 odorants, each
+      delivered as a known vapor-phase concentration from sealed sampling bags, and a neural network
+      learned to map molecular features plus log concentration to the 0–100 intensity rating. Its
+      inputs include Dragon&nbsp;6 3-D descriptors, vapor pressure and boiling point, which can't be
+      computed in the browser, so the network is evaluated offline across a fine concentration grid
+      for every molecule with those features. The page then reads the curve off that grid. Vapor
+      pressures come from the MixInt dataset for the training odorants and from the EPA
+      <a href="https://comptox.epa.gov/dashboard/" target="_blank" rel="noopener">CompTox</a>
+      OPERA values (experimental where available) for everything else. Predictions outside the rated
+      concentration range, or for molecules unlike the 62 training odorants, are extrapolations.
+    </p>
     <h3>Odor quality</h3>
     <p>
       <strong>Predicted descriptors</strong> come from
@@ -193,6 +218,17 @@
         <a href="https://doi.org/10.3390/toxics13100902" target="_blank" rel="noopener">doi:10.3390/toxics13100902</a>
         <span class="ref-use">— the TTC / inhalation-exposure framing</span></li>
 
+      <li>Pellegrino&nbsp;R, Samoilova&nbsp;K, Ihara&nbsp;Y, Andres&nbsp;M, Singh&nbsp;V, Gerkin&nbsp;RC,
+        Koulakov&nbsp;A, Mainland&nbsp;JD. A quantitative framework for predicting odor intensity
+        across molecule and mixtures. <em>bioRxiv</em> (2025), preprint.
+        <a href="https://doi.org/10.1101/2025.08.08.668954" target="_blank" rel="noopener">doi:10.1101/2025.08.08.668954</a>
+        <span class="ref-use">— the single-molecule intensity network (not yet peer reviewed)</span></li>
+
+      <li>Mansouri&nbsp;K, Grulke&nbsp;CM, Judson&nbsp;RS, Williams&nbsp;AJ. OPERA models for predicting
+        physicochemical properties and environmental fate endpoints. <em>J Cheminform</em> 10:10 (2018).
+        <a href="https://doi.org/10.1186/s13321-018-0263-1" target="_blank" rel="noopener">doi:10.1186/s13321-018-0263-1</a>
+        <span class="ref-use">— vapor pressures (via the EPA CompTox APIs) for molecules outside the MixInt set</span></li>
+
       <li>Laing&nbsp;DG. Natural sniffing gives optimum odour perception for humans.
         <em>Perception</em> 12(2):99–117 (1983).
         <a href="https://doi.org/10.1068/p120099" target="_blank" rel="noopener">doi:10.1068/p120099</a>
@@ -209,8 +245,8 @@
     </ol>
 
     <p class="disclaimer">
-      For research and educational use. Predictions are estimates of odor <em>class</em>, not odor
-      quality or intensity, and can be wrong — especially for molecules unlike those in the training set.
+      For research and educational use. All predictions are model estimates and can be wrong —
+      especially for molecules unlike those in each model's training set.
     </p>
   </section>
 </main>
