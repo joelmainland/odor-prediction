@@ -316,7 +316,7 @@
     $("props").innerHTML = props.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
   }
 
-  // ---- Shared physical properties (physchem.json: CompTox OPERA VP + logP) ----
+  // ---- Shared physical properties (physchem.json: CompTox OPERA + EPI Suite VP, logP) ----
   function ensurePhyschem() {
     if (!physPromise) {
       physPromise = fetch(asset("data/physchem.json")).then((r) => r.json()).then((d) => {
@@ -325,7 +325,7 @@
         // the site has the unspecified form. VP and logP are stereo-insensitive
         // (siblings differ by <=0.7 log units), so fall back to the skeleton,
         // preferring measured values.
-        const rank = (r) => (r.v == null ? 0 : r.vs === "p" ? 1 : 2);
+        const rank = (r) => (r.v == null ? 0 : physPredicted(r.vs) ? 1 : 2);
         for (const rec of d.mols) {
           byKeyPhys.set(rec.i, rec);
           const f = rec.i.split("-")[0], cur = byFlatPhys.get(f);
@@ -339,10 +339,14 @@
   function lookupPhys(ikey) {
     if (!ikey) return null;
     const exact = byKeyPhys.get(ikey);
-    if (exact) return exact;
+    // st: the build already borrowed this VP from a stereoisomer (measured beats own-predicted)
+    if (exact) return exact.st ? { ...exact, stereo: true } : exact;
     const sib = byFlatPhys.get(ikey.split("-")[0]);
     return sib ? { ...sib, stereo: true } : null;
   }
+
+  // Whether a physchem.json source code is a model prediction (OPERA, MPBPVP, KOWWIN).
+  const physPredicted = (code) => ((PHYS && PHYS.meta.pred) || ["p"]).includes(code);
 
   // Human-readable source of a physchem.json value, e.g. "CompTox experimental".
   function physSource(phys, key) {
@@ -363,7 +367,7 @@
     if (manual && manual.vp != null) { o.vp = manual.vp; o.vpSource = "your value"; }
     else if (hit && hit.vp != null) { o.vp = hit.vp; o.vpSource = "Mayhew et al. dataset"; }
     else if (phys && phys.v != null) {
-      o.vp = phys.v; o.vpSource = physSource(phys, "vs"); o.vpPredicted = phys.vs === "p";
+      o.vp = phys.v; o.vpSource = physSource(phys, "vs"); o.vpPredicted = physPredicted(phys.vs);
     }
     if (manual && manual.logp != null) { o.logp = manual.logp; o.logpSource = "your value"; }
     else if (hit && hit.logp != null) {
@@ -446,7 +450,7 @@
     ctx.transport = { t, tv };
     if (tv.verdict) {
       const scaleNote = t.logpFit ? "" :
-        ` The boundaries were fit on Moriguchi logP; this uses ${t.logpSource.includes("Crippen") ? "Crippen" : "OPERA"} logP.`;
+        ` The boundaries were fit on Moriguchi logP; this uses ${t.logpSource.includes("Crippen") ? "Crippen" : t.logpSource.includes("KOWWIN") ? "KOWWIN" : t.logpSource.includes("OPERA") ? "OPERA" : t.logpSource.includes("experimental") ? "measured octanol–water" : "your"} logP.`;
       rows.push({ tier: "model", used: true, vote: tv.verdict,
         name: "Transport boundaries (vapor pressure &amp; logP)",
         detail: `VP ${fmtSci(t.vp)} mmHg <small class="src">${escapeHtml(t.vpSource)}</small>, ` +
@@ -1029,11 +1033,11 @@
     return `the Revised Cramer tree, ${CRAMER_LABEL[rec.c]}`;
   }
 
-  // Vapor pressure for the sniff count: your value > CompTox > Mayhew dataset.
+  // Vapor pressure for the sniff count: your value > physchem.json > Mayhew dataset.
   function toxVP(ctx) {
     if (ctx.manual && ctx.manual.vp != null) return { vp: ctx.manual.vp, src: "your value", pred: false };
     const phys = lookupPhys(ctx.ikey);
-    if (phys && phys.v != null) return { vp: phys.v, src: physSource(phys, "vs"), pred: phys.vs === "p" };
+    if (phys && phys.v != null) return { vp: phys.v, src: physSource(phys, "vs"), pred: physPredicted(phys.vs) };
     if (ctx.hit && ctx.hit.vp != null) return { vp: ctx.hit.vp, src: "Mayhew et al. dataset", pred: false };
     return null;
   }

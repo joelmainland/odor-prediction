@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Molecule odor & inhalation explorer — properties from chemical structure</title>
 <meta name="description" content="Explore a molecule from its chemical structure: predict whether it is odorous, visualize the transport-boundary model (Mayhew et al., PNAS 2022), and see an inhalation Threshold-of-Toxicological-Concern reference (Mohar et al. 2025)." />
-<link rel="stylesheet" href="style.css?v=202609231901" />
+<link rel="stylesheet" href="style.css?v=202609240151" />
 </head>
 <body>
 <header class="site-header">
@@ -100,7 +100,7 @@
       <p class="hint">A neutral, comparative figure: how many sniffs of the <em>neat</em> (undiluted)
         headspace would together deliver the molecule's daily <strong>Threshold of Toxicological
         Concern (TTC)</strong>. Derived from its Toxtree hazard class (Revised Cramer, mutagenicity
-        alerts) and CompTox vapor pressure, assuming a 0.5&nbsp;L average sniff (Laing 1983). Available
+        alerts) and vapor pressure (CompTox / EPI&nbsp;Suite), assuming a 0.5&nbsp;L average sniff (Laing 1983). Available
         for the ~11,700 molecules in the site's tables. <strong>This is not a safety determination, exposure limit, or
         recommendation.</strong></p>
       <div id="tox-box"></div>
@@ -132,9 +132,10 @@
       When you enter one of the 1,924 molecules from the study's curated dataset, the tool also shows
       the actual <strong>gradient-boosted transport-ML probability</strong> reported in the paper.
       Vapor pressure and logP for other molecules come from the EPA
-      <a href="https://comptox.epa.gov/dashboard/" target="_blank" rel="noopener">CompTox</a> OPERA
-      values (experimental where available, predicted otherwise). The boundaries were fit on
-      Moriguchi logP, so applying them to OPERA octanol–water logP is an approximation.
+      <a href="https://comptox.epa.gov/dashboard/" target="_blank" rel="noopener">CompTox</a> and
+      <a href="https://www.epa.gov/tsca-screening-tools/epi-suitetm-estimation-program-interface" target="_blank" rel="noopener">EPI&nbsp;Suite</a> databases: a measured value when either has one, otherwise the OPERA prediction, and
+      otherwise EPI&nbsp;Suite's MPBPVP (vapor pressure) or KOWWIN (logP) estimate. The boundaries were
+      fit on Moriguchi logP, so applying them to other octanol–water logP scales is an approximation.
     </p>
     <p>
       <strong>Does it have an odor?</strong> The panel weighs every line of evidence the site has and
@@ -155,7 +156,7 @@
       mutagenicity structural alert (ISS in-vitro Ames rules, or the Gradient supplemental rules) sets
       1.5&nbsp;µg/day; otherwise a Gradient supplemental class, else the <strong>Revised Cramer</strong>
       class, sets 90, 540 or 1800&nbsp;µg/day. The per-sniff inhaled mass is
-      estimated from vapor pressure (CompTox) and molecular weight assuming a 0.5&nbsp;L average sniff
+      estimated from vapor pressure (CompTox or EPI&nbsp;Suite) and molecular weight assuming a 0.5&nbsp;L average sniff
       (<a href="https://doi.org/10.1068/p120099" target="_blank" rel="noopener">Laing 1983</a>).
       The inhalation-exposure framing follows
       <a href="https://doi.org/10.3390/toxics13100902" target="_blank" rel="noopener">Mohar&nbsp;et&nbsp;al., <em>Toxics</em> 2025</a>.
@@ -176,8 +177,9 @@
       computed in the browser, so the network is evaluated offline across a fine concentration grid
       for every molecule with those features. The page then reads the curve off that grid. Vapor
       pressures come from the MixInt dataset for the training odorants and from the EPA
-      <a href="https://comptox.epa.gov/dashboard/" target="_blank" rel="noopener">CompTox</a>
-      OPERA values (experimental where available) for everything else. Predictions outside the rated
+      <a href="https://comptox.epa.gov/dashboard/" target="_blank" rel="noopener">CompTox</a> and
+      <a href="https://www.epa.gov/tsca-screening-tools/epi-suitetm-estimation-program-interface" target="_blank" rel="noopener">EPI&nbsp;Suite</a> for everything else (measured where available, then OPERA, then the MPBPVP estimate —
+      the same method behind the training odorants' values). Predictions outside the rated
       concentration range, or for molecules unlike the 62 training odorants, are extrapolations.
     </p>
     <h3>Odor quality</h3>
@@ -246,6 +248,11 @@
         <a href="https://doi.org/10.1186/s13321-018-0263-1" target="_blank" rel="noopener">doi:10.1186/s13321-018-0263-1</a>
         <span class="ref-use">— vapor pressures and logP (via the EPA CompTox APIs) for molecules outside the MixInt and Mayhew et al. sets</span></li>
 
+      <li>US EPA. Estimation Programs Interface Suite™ for Microsoft® Windows, v4.11 (MPBPVP, KOWWIN
+        and the PhysProp experimental database), run from the EPI&nbsp;Suite CLI 1.1.0 (SRC, Inc.,
+        <a href="https://episuite.dev" target="_blank" rel="noopener">episuite.dev</a>).
+        <span class="ref-use">— measured and estimated vapor pressures and logP where CompTox has no measurement</span></li>
+
       <li>Laing&nbsp;DG. Natural sniffing gives optimum odour perception for humans.
         <em>Perception</em> 12(2):99–117 (1983).
         <a href="https://doi.org/10.1068/p120099" target="_blank" rel="noopener">doi:10.1068/p120099</a>
@@ -280,6 +287,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@rdkit/rdkit@2025.3.4-1.0.0/dist/RDKit_minimal.js"></script>
 <!-- ?v= is the cache-busting version tag: bump it on every deploy (scripts/bump_version.sh).
      app.js reads it from its own src and appends it to every data file it fetches. -->
-<script src="app.js?v=202609231901"></script>
+<script src="app.js?v=202609240151"></script>
 </body>
 </html>

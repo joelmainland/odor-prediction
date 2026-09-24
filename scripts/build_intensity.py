@@ -17,13 +17,12 @@ interpolation on the grid is near-exact (the build reports the maximum error).
 Feature provenance, in priority order:
   Dragon   : the MixInt training table for the 62 training odorants (exactly what the
              network saw), otherwise AllDragon_251125.csv.
-  VP / BP  : the curated training values for the 62, otherwise CompTox OPERA_VP/OPERA_BP
-             (scripts/fetch_comptox_physchem.py). CompTox often lists only specific
-             stereoisomers (it has (R)- and (S)-limonene but not unspecified limonene),
-             so a molecule without its own VP/BP borrows a stereoisomer's (same InChIKey
-             skeleton; measured preferred). VP is stereo-insensitive. Molecules with no
-             VP at all are left out -- VP is the one physchem input the predictions are
-             sensitive to.
+  VP / BP  : the curated training values for the 62, otherwise CompTox OPERA and EPI Suite
+             (fetch_comptox_physchem.py, fetch_episuite_physchem.py), ranked by
+             physchem_sources.py: measured before predicted, a molecule's own record
+             before a stereoisomer's (VP is stereo-insensitive), MPBPVP estimate last.
+             Molecules with no VP at all are left out -- VP is the one physchem input
+             the predictions are sensitive to.
   alpha-*  : the MATLAB alpha-shape values from the earlier features.csv export,
              otherwise imputed by a linear fit on Dragon size descriptors. The network
              is insensitive to them.
@@ -41,6 +40,8 @@ import numpy as np
 import onnxruntime as ort
 import pandas as pd
 from rdkit import Chem, RDLogger
+
+from physchem_sources import SRC, resolve
 RDLogger.DisableLog("rdApp.*")
 
 GDRIVE = os.path.expanduser(
@@ -57,6 +58,7 @@ ap.add_argument("--observed", default=f"{GDRIVE}/mixint/mixint-single-behavior.c
                 help="panel ratings, used only to validate the build (never published)")
 ap.add_argument("--dragon", default=f"{DROPBOX}/Google Mixtures/data/processed/chemoinfo/AllDragon_251125.csv")
 ap.add_argument("--physchem", default="scripts/data/comptox_physchem.csv")
+ap.add_argument("--episuite", default="scripts/data/episuite_physchem.csv")
 ap.add_argument("--output", default="docs/data/intensity.json")
 ap.add_argument("--export-features", metavar="PREFIX",
                 help="also write PREFIX.csv (model-ready features) and PREFIX_provenance.csv "
@@ -86,20 +88,17 @@ print(f"AllDragon {len(dr)} molecules; training {len(tr)}; CompTox rows {len(pc)
 X = dr[DRAGON].apply(pd.to_numeric, errors="coerce")
 X.loc[X.index.intersection(tr.index)] = tr[DRAGON].apply(pd.to_numeric, errors="coerce")
 
-# VP / BP
-vp = pc.vp_mmHg.reindex(X.index)
-bp = pc.bp_C.reindex(X.index)
-vsrc = pc.vp_source.reindex(X.index).map({"experimental": "e", "predicted": "p"})
-# Stereoisomer fallback: best VP/BP per InChIKey skeleton, measured over predicted.
-sk = pc.inchikey.str.split("-").str[0]
-cand = pc.assign(sk=sk, r=(pc.vp_source == "experimental").astype(int))
-cand = cand[cand.vp_mmHg > 0].sort_values("r", ascending=False).drop_duplicates("sk").set_index("sk")
-sib_sk = sk.reindex(X.index)
-stereo = vp.isna() & sib_sk.isin(cand.index)
-vp.loc[stereo] = cand.vp_mmHg.reindex(sib_sk[stereo]).values
-bp.loc[stereo & bp.isna()] = cand.bp_C.reindex(sib_sk[stereo & bp.isna()]).values
-vsrc.loc[stereo] = cand.vp_source.reindex(sib_sk[stereo]).map({"experimental": "e", "predicted": "p"}).values
-print(f"VP borrowed from a stereoisomer for {int(stereo.sum())} molecules")
+# VP / BP, ranked by physchem_sources (CompTox + EPI Suite; measured first, then own
+# record before a stereoisomer's). CompTox often lists only specific stereoisomers (it has
+# (R)- and (S)-limonene but not unspecified limonene); EPI Suite estimates anything.
+ep = pd.read_csv(args.episuite)
+ikeys = pc.inchikey.reindex(X.index)
+res = resolve(ikeys.dropna().unique(), pc.reset_index(), ep)
+get = lambda f: pd.Series([res.get(k, {}).get(f) if isinstance(k, str) else None for k in ikeys],
+                          index=X.index)
+vp, bp, vsrc = get("vp").astype(float), get("bp").astype(float), get("vs")
+stereo = get("st").fillna(False).astype(bool)
+print(f"VP sources: {vsrc.value_counts().to_dict()}; {int(stereo.sum())} from a stereoisomer")
 t_ids = X.index.intersection(tr.index)
 vp.loc[t_ids], bp.loc[t_ids], vsrc.loc[t_ids] = tr.best_vp[t_ids], tr.best_bp[t_ids], "t"
 X["best_vp"], X["best_bp"] = vp, bp
@@ -137,7 +136,7 @@ if args.export_features:
                  columns=names).to_csv(args.export_features + ".csv")
     prov = pd.DataFrame({"cid": want, "in_model_features": want.isin(X.index),
                          "vp_mmHg": vp.reindex(want).values, "bp_C": bp.reindex(want).values,
-                         "vp_source": pc.vp_source.reindex(want).values,
+                         "vp_source": vsrc.reindex(want).map(SRC).values,
                          "dtxsid": pc.dtxsid.reindex(want).values})
     prov.loc[prov.cid.isin(tr.index), "vp_source"] = "MixInt curated (EPI Suite)"
     prov.to_csv(args.export_features + "_provenance.csv", index=False)
@@ -207,8 +206,7 @@ out = {
         "train": {"lo": TRAIN_LO, "hi": TRAIN_HI, "n": int(len(tr))},
         "scale": "0-100 intensity rating; stored x10",
         "conc": "log10 vapor-phase concentration (v/v in air)",
-        "vs": {"t": "MixInt curated (EPI Suite)", "e": "CompTox experimental",
-               "p": "CompTox OPERA prediction"},
+        "vs": {"t": "MixInt curated (EPI Suite)", **SRC},
         "source": "Pellegrino et al. 2025, bioRxiv 10.1101/2025.08.08.668954 (preprint)",
     },
     "mols": mols,

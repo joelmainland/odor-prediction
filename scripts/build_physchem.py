@@ -4,25 +4,32 @@
 One shared table so the odor (transport), intensity and toxicity modules all read the
 same physical properties instead of each carrying its own copy.
 
-Sources, best first:
-  VP   : MixInt curated (EPI Suite best_vp, the 62 intensity training odorants)
-         > CompTox OPERA experimental > CompTox OPERA prediction
-  logP : CompTox OPERA experimental > CompTox OPERA prediction
+Sources: MixInt curated VPs (EPI Suite best_vp, the 62 intensity training odorants) win;
+everything else is ranked by scripts/physchem_sources.py (CompTox OPERA + EPI Suite,
+measured before predicted, own record before a stereoisomer's).
 The Mayhew et al. dataset values (molecules.json) are NOT folded in here; the client
 prefers them itself because the transport boundaries were fit on them.
 
-Input: scripts/data/comptox_physchem_site.csv from
+Inputs, for the site tables (site_molecules.csv) and the intensity library (AllDragon):
   python3 scripts/fetch_comptox_physchem.py scripts/data/site_molecules.csv \
       --output scripts/data/comptox_physchem_site.csv
-Output record: {"i": inchikey, "v": vp_mmHg, "vs": src, "l": logp, "ls": src}."""
-import json, math
+  python3 scripts/fetch_episuite_physchem.py scripts/data/site_molecules.csv \
+      --output scripts/data/episuite_physchem_site.csv
+  (and scripts/data/{comptox,episuite}_physchem.csv from alldragon_molecules.csv)
+Output record: {"i": inchikey, "v": vp_mmHg, "vs": src, "st": 1 if the VP is a
+stereoisomer's, "l": logp, "ls": src}."""
+import json
+
 import pandas as pd
 
-SRC = {"t": "MixInt curated (EPI Suite)",
-       "e": "CompTox experimental",
-       "p": "CompTox OPERA prediction"}
+from physchem_sources import SRC, resolve
 
-df = pd.read_csv("scripts/data/comptox_physchem_site.csv")
+SRC = {"t": "MixInt curated (EPI Suite)", **SRC}
+
+ct = pd.concat([pd.read_csv("scripts/data/comptox_physchem_site.csv"),
+                pd.read_csv("scripts/data/comptox_physchem.csv")], ignore_index=True)
+ep = pd.concat([pd.read_csv("scripts/data/episuite_physchem_site.csv"),
+                pd.read_csv("scripts/data/episuite_physchem.csv")], ignore_index=True)
 intensity = json.load(open("docs/data/intensity.json"))
 curated = {r["i"]: r["vp"] for r in intensity["mols"] if r.get("vs") == "t"}
 
@@ -31,26 +38,28 @@ def sig(x, n=4):
     return float(f"{x:.{n}g}")
 
 
+keys = sorted(set(ct.inchikey.dropna()) | set(ep.inchikey.dropna()) | set(curated))
+res = resolve(keys, ct, ep)
 mols = {}
-for r in df.to_dict("records"):
-    k = r["inchikey"]
-    if not isinstance(k, str) or k in mols:
-        continue
-    rec: dict = {"i": k}
+for k in keys:
+    r, rec = res.get(k, {}), {"i": k}
     if k in curated:
         rec["v"], rec["vs"] = sig(curated[k]), "t"
-    elif isinstance(r["vp_source"], str) and r["vp_mmHg"] > 0:
-        rec["v"], rec["vs"] = sig(r["vp_mmHg"]), r["vp_source"][0]
-    if isinstance(r["logp_source"], str) and math.isfinite(r["logp"]):
-        rec["l"], rec["ls"] = round(r["logp"], 2), r["logp_source"][0]
+    elif "vp" in r:
+        rec["v"], rec["vs"] = sig(r["vp"]), r["vs"]
+        if r["st"]:
+            rec["st"] = 1
+    if "logp" in r:
+        rec["l"], rec["ls"] = round(r["logp"], 2), r["ls"]
     if len(rec) > 1:
         mols[k] = rec
-for k, vp in curated.items():          # curated odorants CompTox didn't match
-    mols.setdefault(k, {"i": k, "v": sig(vp), "vs": "t"})
 
 out = {"meta": {"n": len(mols), "src": SRC,
-                "note": "vp in mmHg at 25 C; logp is octanol-water (OPERA)"},
-       "mols": sorted(mols.values(), key=lambda r: r["i"])}
+                "pred": sorted(c for c in SRC if c in "pmk"),
+                "note": "vp in mmHg at 25 C; logp is octanol-water (OPERA or KOWWIN)"},
+       "mols": [mols[k] for k in sorted(mols)]}
 json.dump(out, open("docs/data/physchem.json", "w"), separators=(",", ":"))
-nv = sum("v" in r for r in mols.values()); nl = sum("l" in r for r in mols.values())
-print(f"wrote docs/data/physchem.json: {len(mols)} molecules, {nv} with VP, {nl} with logP")
+vs = pd.Series([r.get("vs") for r in mols.values()]).value_counts().to_dict()
+ls = pd.Series([r.get("ls") for r in mols.values()]).value_counts().to_dict()
+print(f"wrote docs/data/physchem.json: {len(mols)} molecules; VP sources {vs}; logP sources {ls}; "
+      f"{sum('st' in r for r in mols.values())} VPs from a stereoisomer")
