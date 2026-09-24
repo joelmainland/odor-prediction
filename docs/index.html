@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Molecule odor & inhalation explorer — properties from chemical structure</title>
 <meta name="description" content="Explore a molecule from its chemical structure: predict whether it is odorous, visualize the transport-boundary model (Mayhew et al., PNAS 2022), and see an inhalation Threshold-of-Toxicological-Concern reference (Mohar et al. 2025)." />
-<link rel="stylesheet" href="style.css?v=202609240151" />
+<link rel="stylesheet" href="style.css?v=202609240214" />
 </head>
 <body>
 <header class="site-header">
@@ -101,7 +101,7 @@
         headspace would together deliver the molecule's daily <strong>Threshold of Toxicological
         Concern (TTC)</strong>. Derived from its Toxtree hazard class (Revised Cramer, mutagenicity
         alerts) and vapor pressure (CompTox / EPI&nbsp;Suite), assuming a 0.5&nbsp;L average sniff (Laing 1983). Available
-        for the ~11,700 molecules in the site's tables. <strong>This is not a safety determination, exposure limit, or
+        for the ~13,000 molecules in the site's tables. <strong>This is not a safety determination, exposure limit, or
         recommendation.</strong></p>
       <div id="tox-box"></div>
     </div>
@@ -149,7 +149,7 @@
     </p>
     <h3>Inhalation reference</h3>
     <p>
-      For the ~11,700 molecules in the site's tables, the tool also reports how many sniffs of the
+      For the ~13,000 molecules in the site's tables, the tool also reports how many sniffs of the
       <em>neat</em> (undiluted) headspace would together deliver the molecule's daily
       <strong>Threshold of Toxicological Concern (TTC)</strong>. The TTC is assigned with
       <a href="https://toxtree.sourceforge.net/" target="_blank" rel="noopener">Toxtree</a> 3.1: a
@@ -287,6 +287,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@rdkit/rdkit@2025.3.4-1.0.0/dist/RDKit_minimal.js"></script>
 <!-- ?v= is the cache-busting version tag: bump it on every deploy (scripts/bump_version.sh).
      app.js reads it from its own src and appends it to every data file it fetches. -->
-<script src="app.js?v=202609240151"></script>
+<script src="app.js?v=202609240214"></script>
 </body>
 </html>
