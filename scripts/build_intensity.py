@@ -18,8 +18,12 @@ Feature provenance, in priority order:
   Dragon   : the MixInt training table for the 62 training odorants (exactly what the
              network saw), otherwise AllDragon_251125.csv.
   VP / BP  : the curated training values for the 62, otherwise CompTox OPERA_VP/OPERA_BP
-             (scripts/fetch_comptox_physchem.py). Molecules with no VP are left out --
-             VP is the one physchem input the predictions are sensitive to.
+             (scripts/fetch_comptox_physchem.py). CompTox often lists only specific
+             stereoisomers (it has (R)- and (S)-limonene but not unspecified limonene),
+             so a molecule without its own VP/BP borrows a stereoisomer's (same InChIKey
+             skeleton; measured preferred). VP is stereo-insensitive. Molecules with no
+             VP at all are left out -- VP is the one physchem input the predictions are
+             sensitive to.
   alpha-*  : the MATLAB alpha-shape values from the earlier features.csv export,
              otherwise imputed by a linear fit on Dragon size descriptors. The network
              is insensitive to them.
@@ -86,6 +90,16 @@ X.loc[X.index.intersection(tr.index)] = tr[DRAGON].apply(pd.to_numeric, errors="
 vp = pc.vp_mmHg.reindex(X.index)
 bp = pc.bp_C.reindex(X.index)
 vsrc = pc.vp_source.reindex(X.index).map({"experimental": "e", "predicted": "p"})
+# Stereoisomer fallback: best VP/BP per InChIKey skeleton, measured over predicted.
+sk = pc.inchikey.str.split("-").str[0]
+cand = pc.assign(sk=sk, r=(pc.vp_source == "experimental").astype(int))
+cand = cand[cand.vp_mmHg > 0].sort_values("r", ascending=False).drop_duplicates("sk").set_index("sk")
+sib_sk = sk.reindex(X.index)
+stereo = vp.isna() & sib_sk.isin(cand.index)
+vp.loc[stereo] = cand.vp_mmHg.reindex(sib_sk[stereo]).values
+bp.loc[stereo & bp.isna()] = cand.bp_C.reindex(sib_sk[stereo & bp.isna()]).values
+vsrc.loc[stereo] = cand.vp_source.reindex(sib_sk[stereo]).map({"experimental": "e", "predicted": "p"}).values
+print(f"VP borrowed from a stereoisomer for {int(stereo.sum())} molecules")
 t_ids = X.index.intersection(tr.index)
 vp.loc[t_ids], bp.loc[t_ids], vsrc.loc[t_ids] = tr.best_vp[t_ids], tr.best_bp[t_ids], "t"
 X["best_vp"], X["best_bp"] = vp, bp
@@ -182,6 +196,8 @@ for i in order:
            "vp": float(f"{X.best_vp.iat[i]:.4g}"), "vs": vsrc.iat[i]}
     if cid in tr.index:
         rec["t"] = 1
+    elif stereo.get(cid, False):
+        rec["st"] = 1                                   # VP from another stereoisomer
     mols.append(rec)
 
 out = {

@@ -5,6 +5,14 @@
 (function () {
   "use strict";
 
+  // Cache-busting version tag, taken from this script's own src (app.js?v=...). GitHub
+  // Pages lets browsers cache files for 10 min, so without it a visitor right after a
+  // deploy can get a new index.html with an old app.js or old data tables.
+  const VERSION = (() => {
+    try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (e) { return ""; }
+  })();
+  const asset = (path) => (VERSION ? `${path}?v=${encodeURIComponent(VERSION)}` : path);
+
   // ---- Model constants (from the paper) ----
   // Rule of three: odorous if 30 <= MW <= 300 Da and heteroatoms < 4.
   const RULE_MW_MIN = 30, RULE_MW_MAX = 300, RULE_NHET_MAX = 4;
@@ -68,7 +76,7 @@
   // ---- Boot ----
   Promise.all([
     window.initRDKitModule().then((m) => { RDKit = m; }),
-    fetch("data/molecules.json").then((r) => r.json()).then((d) => {
+    fetch(asset("data/molecules.json")).then((r) => r.json()).then((d) => {
       DATA = d;
       for (const rec of d) {
         if (rec.ikey) byKey.set(rec.ikey, rec);
@@ -311,7 +319,7 @@
   // ---- Shared physical properties (physchem.json: CompTox OPERA VP + logP) ----
   function ensurePhyschem() {
     if (!physPromise) {
-      physPromise = fetch("data/physchem.json").then((r) => r.json()).then((d) => {
+      physPromise = fetch(asset("data/physchem.json")).then((r) => r.json()).then((d) => {
         PHYS = d;
         // CompTox often lists only specific stereoisomers (e.g. (R)-2-nonanol) while
         // the site has the unspecified form. VP and logP are stereo-insensitive
@@ -585,7 +593,7 @@
   // pyrfume molecule set. openpom.json is large, so it is fetched on first use.
   function ensureOpenPOM() {
     if (!pomPromise) {
-      pomPromise = fetch("data/openpom.json").then((r) => r.json()).then((d) => {
+      pomPromise = fetch(asset("data/openpom.json")).then((r) => r.json()).then((d) => {
         POM = d;
         for (const rec of d.mols) {
           byKeyPOM.set(rec.i, rec.p);
@@ -638,7 +646,7 @@
     return new Promise((resolve, reject) => {
       if (!pomWorker) {
         try {
-          pomWorker = new Worker("pom-worker.js");
+          pomWorker = new Worker(asset("pom-worker.js"));
         } catch (e) { reject(e); return; }
         pomWorker.onmessage = (ev) => {
           const job = pomJobs.get(ev.data.seq);
@@ -656,7 +664,7 @@
       }
       const seq = ++pomJobSeq;
       pomJobs.set(seq, { resolve, reject });
-      pomWorker.postMessage({ seq, json: molJson, base: "data/" });
+      pomWorker.postMessage({ seq, json: molJson, base: "data/", v: VERSION });
     });
   }
 
@@ -745,7 +753,7 @@
   // so it is fetched on first use rather than at boot.
   function ensureQuality() {
     if (!qualPromise) {
-      qualPromise = fetch("data/quality.json").then((r) => r.json()).then((d) => {
+      qualPromise = fetch(asset("data/quality.json")).then((r) => r.json()).then((d) => {
         for (const rec of d) {
           if (rec.ikey) byKeyQ.set(rec.ikey, rec);
           if (rec.can) byCanQ.set(rec.can, rec);
@@ -790,7 +798,7 @@
   // The network is piecewise-linear in log C, so linear interpolation is near-exact.
   function ensureIntensity() {
     if (!intPromise) {
-      intPromise = fetch("data/intensity.json").then((r) => r.json()).then((d) => {
+      intPromise = fetch(asset("data/intensity.json")).then((r) => r.json()).then((d) => {
         INT = d;
         for (const rec of d.mols) {
           byKeyInt.set(rec.i, rec);
@@ -871,7 +879,7 @@
       const satIn = sat >= g.lo && sat <= gHi;
       const iSat = satIn ? intensityAt(rec, sat) : null;
       const cRef = concForIntensity(rec, INT_REF);
-      const vpSrc = INT.meta.vs[rec.vs] || "";
+      const vpSrc = (INT.meta.vs[rec.vs] || "") + (rec.st ? ", other stereoisomer" : "");
 
       const lines = [];
       if (iSat != null) {
@@ -988,7 +996,7 @@
   let byFlatTox = new Map(); // InChIKey skeleton -> most conservative record
   function ensureTox() {
     if (!toxPromise) {
-      toxPromise = fetch("data/toxicity.json").then((r) => r.json()).then((d) => {
+      toxPromise = fetch(asset("data/toxicity.json")).then((r) => r.json()).then((d) => {
         TOX = d;
         for (const rec of d.mols) {
           byKeyTox.set(rec.i, rec);

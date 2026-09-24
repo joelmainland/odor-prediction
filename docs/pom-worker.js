@@ -188,10 +188,11 @@ function halfToFloat(h) {
   return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
 }
 
-async function loadWeights(base) {
+async function loadWeights(base, v) {
+  const q = v ? `?v=${encodeURIComponent(v)}` : "";   // cache-busting tag from app.js
   const [manifest, buf] = await Promise.all([
-    fetch(base + "pom_weights.json").then((r) => r.json()),
-    fetch(base + "pom_weights.bin").then((r) => r.arrayBuffer()),
+    fetch(base + "pom_weights.json" + q).then((r) => r.json()),
+    fetch(base + "pom_weights.bin" + q).then((r) => r.arrayBuffer()),
   ]);
   const out = {};
   for (const t of manifest.tensors) {
@@ -353,9 +354,9 @@ let ready = null;
 
 if (typeof self !== "undefined" && typeof self.postMessage === "function") {
   self.onmessage = async (ev) => {
-    const { json, seq, base } = ev.data;
+    const { json, seq, base, v } = ev.data;
     try {
-      if (!ready) ready = loadWeights(base || "data/").then((w) => { W = w; });
+      if (!ready) ready = loadWeights(base || "data/", v).then((w) => { W = w; });
       await ready;
       const t0 = (self.performance || Date).now();
       const { probs } = forward(typeof json === "string" ? JSON.parse(json) : json);
